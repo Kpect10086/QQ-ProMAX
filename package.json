@@ -4,7 +4,7 @@
   "description": "QQ ProMAX: Cortico QQ 私聊、群聊、空间和语音扩展，支持 OneBot v11 / SnowLuma / NapCat。",
   "type": "module",
   "main": "./src/index.ts",
-  "license": "AGPL-3.0-or-later",
+  "license": "MIT",
   "keywords": [
     "cortico-world",
     "cortico",

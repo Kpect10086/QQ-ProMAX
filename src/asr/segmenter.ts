@@ -22,7 +22,7 @@
  * 静音之外还想多等多久",默认 0。流水线空闲后，`maxHoldMs` 到期的批次立即发车。
  *
  * ---
- * 本文件与 cortico-world-desktop-pet 的 src/asr/segmenter.ts **同源**（桌宠的"听"能力）。
+ * 本文件提供 QQ "听"能力的切句/并句模块。
  * QQ 系统级通话(system 模式)复用同一套切句算法,以便未来合并桌宠时二者共用一份,
  * 无需重写。仅识别器后端不同(桌宠用 SystemRecognizer/FunAsrRecognizer;本扩展用
  * HttpRecognizer 包住 asr 侧车 /asr),识别接口同为 transcribe(pcm)->TranscribeResult。

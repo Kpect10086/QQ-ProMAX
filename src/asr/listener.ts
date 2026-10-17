@@ -1,8 +1,8 @@
 /**
  * 把"听"做成自包含模块：喂 16-bit PCM 帧 → 切句(Segmenter) → 识别(Recognizer) → 并句(Packer) → onText(text)。
  *
- * 设计目标：**统一 + 模块化**，让 QQ 系统级通话与桌宠(desktop-pet)共用同一套"听"管线，未来合并时
- * 不必重写。具体约定与 cortico-world-desktop-pet 的 src/asr/ **完全一致**：
+ * 设计目标：**统一 + 模块化**，让 QQ 系统级通话与语音共用同一套"听"管线。
+ * 具体约定如下：
  *   - 切句/并句 = 桌宠同款 Segmenter / Packer（纯逻辑，本目录即同源复制）；
  *   - 识别器 = 与桌宠同契约的 `Recognizer` 接口（transcribe(pcm)->TranscribeResult）；
  *     当前用 HttpRecognizer(包住 asr 侧车 /asr)；合并桌宠时把实例换成 SystemRecognizer

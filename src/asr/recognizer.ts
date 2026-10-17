@@ -2,9 +2,8 @@ import type { TranscribeResult } from './result.ts';
 import { looksHallucinated } from './result.ts';
 
 /**
- * 与 cortico-world-desktop-pet 同契约的识别器接口：transcribe(pcm:Int16Array) → TranscribeResult。
+ * 识别器接口：transcribe(pcm:Int16Array) → TranscribeResult。
  * HttpRecognizer 包住任意「OpenAI 兼容」转写端点（云端 GLM/OpenAI 或本扩展拉起的本地侧车）。
- * 未来合并桌宠时，把本类换成桌宠的 SystemRecognizer / FunAsrRecognizer 即可，listener.ts/world.ts 不变。
  */
 export interface Recognizer {
   transcribe(pcm: Int16Array): Promise<TranscribeResult>;

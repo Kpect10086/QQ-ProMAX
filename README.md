@@ -2,7 +2,9 @@
 
 Owner: src/definition.ts, src/world.ts, src/config.ts.
 
-Cortico 的 QQ World 扩展，基于 cortico-world-qq-final 0.1.65 修改，保留 AGPL-3.0-or-later 许可证和第三方声明。支持 QQ 群聊、私聊、空间、消息历史、表情包、语音。支持 Cortico 0.2.2 / World API 6。
+本插件基于 [@hth768](https://github.com/hth768) 制作的 [QQ-final（cortico-world-qq-final）](https://github.com/hth768/cortico-world-qq-final) 插件开发。
+
+QQ ProMAX 是 Cortico 的 QQ World 扩展，支持 QQ 群聊、私聊、空间、消息历史、表情包和语音，适配 Cortico 0.2.2 / World API 6。当前版本已移除桌宠功能，使用 MIT 协议开源。
 
 ## 安装
 
@@ -30,7 +32,7 @@ QQ 空间默认关闭，开启后依赖协议端支持对应扩展接口。qq_qz
 
 ## 许可证
 
-AGPL-3.0-or-later。完整可编辑 TypeScript 源码随 npm 包提供。语音切句模块的上游来源见 THIRD_PARTY_NOTICES.md；保留原有版权声明。
+本版本使用 [MIT License](LICENSE)，保留上游版权声明。QQ-final 和语音模块的 MIT 授权来源见 [第三方声明](THIRD_PARTY_NOTICES.md)。完整可编辑 TypeScript 源码随本仓库和 0.1.1 安装包提供。
 
 ## 源码与开发
 
