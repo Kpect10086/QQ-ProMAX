@@ -6,7 +6,7 @@ Cortico 的 QQ World 扩展，基于 cortico-world-qq-final 0.1.65 修改，保�
 
 ## 安装
 
-在 Cortico 扩展页搜索 QQ ProMAX 或手动安装 npm 包名 cortico-world-qq-promax，重启已有 Cortico 后加载。
+当前 0.1.1 请从本仓库下载或检出源码，在 Cortico 扩展页选择本机目录安装，重启已有 Cortico 后加载。npm 的 cortico-world-qq-promax 目前为 0.1.0，仍包含桌宠。
 
 本扩展与 cortico-world-qq-final 使用相同的 World id（qqbot）。迁移时保留 worlds.qqbot 配置，先停用并卸载旧扩展，再安装本扩展；不可同时加载两份 qqbot。
 
