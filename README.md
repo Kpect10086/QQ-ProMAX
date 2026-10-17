@@ -8,7 +8,7 @@ QQ ProMAX 是 Cortico 的 QQ World 扩展，支持 QQ 群聊、私聊、空间�
 
 ## 安装
 
-当前 0.1.1 请从本仓库下载或检出源码，在 Cortico 扩展页选择本机目录安装，重启已有 Cortico 后加载。npm 的 cortico-world-qq-promax 目前为 0.1.0，仍包含桌宠。
+在 Cortico 扩展页搜索 QQ ProMAX，或手动安装 npm 包 `cortico-world-qq-promax@0.1.1`，重启已有 Cortico 后加载。也可以从本仓库下载或检出源码，在扩展页选择本机目录安装。
 
 本扩展与 cortico-world-qq-final 使用相同的 World id（qqbot）。迁移时保留 worlds.qqbot 配置，先停用并卸载旧扩展，再安装本扩展；不可同时加载两份 qqbot。
 
@@ -38,7 +38,7 @@ QQ 空间默认关闭，开启后依赖协议端支持对应扩展接口。qq_qz
 
 - 源码：[Kpect10086/QQ-ProMAX](https://github.com/Kpect10086/QQ-ProMAX)
 - npm：[cortico-world-qq-promax](https://www.npmjs.com/package/cortico-world-qq-promax)
-- 本仓库 0.1.1 已移除桌宠、桌宠内置电脑操控、Electron 窗口与形象资源。npm 0.1.0 是较早版本，仍包含桌宠。
+- 0.1.1 已移除桌宠、桌宠内置电脑操控、Electron 窗口与形象资源。升级时请使用 0.1.1 或更新版本。
 
 使用 Windows 和 Node.js 22.13.0 或更新版本：
 
