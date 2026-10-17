@@ -1,0 +1,893 @@
+{
+  "tools": [
+    {
+      "name": "qq_send",
+      "tags": [
+        "speak"
+      ],
+      "description": "回复 QQ 消息事件的唯一渠道：发送一条发往 QQ 群或私聊的消息（不要用 terminal_send，那只会发到控制台终端）。调用即直接发送，无需再确认。to 直接填事件 meta 里的 conv 字段：群聊为 \"group:<群号>\"，私聊为 \"private:<QQ号>\"。\n【私聊分流】当对话话题涉及隐私、秘密、尴尬、暧昧、个人账目/健康/情感等不宜在群内公开的内容时，应把回复改为私聊发给当事人，而非发在群里：先在群里说一句\"这个我私聊你～\"，再调用本工具 to=事件 meta 里的 senderPrivate 字段（形如 \"private:<QQ号>\"）把真正的内容私发过去。反之普通闲聊就直接发回当前群即可。 使用前遵守最新 QQ 发送限制：对应回复开关必须开启，静默时须在独立白名单且有新消息待回复，连接就绪。关闭或被拦截后停止试发，等待状态恢复。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "to": {
+            "type": "string",
+            "description": "发送目标，原样复制事件 meta 里的 conv 字段。群聊填 \"group:<群号>\"，私聊填 \"private:<QQ号>\"。"
+          },
+          "text": {
+            "type": "string",
+            "description": "要发送的消息正文。可用 #编号 引用回复某条消息。"
+          },
+          "reply_message_id": {
+            "type": "number",
+            "description": "可选：引用回复的目标消息编号（也可在 text 里写 #编号）。每条收到的消息行首都带有它的 #编号（即该消息在 QQ 上的真实身份），想引用某条消息就填它的编号；必须是同一会话内的消息，否则会被拒绝。"
+          },
+          "at": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "可选：要 @ 的人，元素为 QQ 号或群内昵称（如 \"123456\" 或 \"张三\"）。发送时会在开头插入 @。"
+          }
+        },
+        "required": [
+          "to",
+          "text"
+        ]
+      }
+    },
+    {
+      "name": "qq_confirm_send",
+      "tags": [
+        "speak"
+      ],
+      "description": "（兼容别名）qq_send 现已直接发送，通常无需调用本工具；仅当仍有未发送草稿时可补发。 使用前遵守最新 QQ 发送限制：对应回复开关必须开启，静默时须在独立白名单且有新消息待回复，连接就绪。关闭或被拦截后停止试发，等待状态恢复。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "draft": {
+            "type": "string",
+            "description": "qq_send 返回的草稿编号；留空则发送最近一条草稿。"
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "qq_view_image",
+      "tags": [
+        "read"
+      ],
+      "description": "主动重新看一张刚收到的 QQ 图片（当被动视觉没拿到描述、或你想细看时）。不传 url 则看最近收到的一张；也可传 url 指定任意图片链接。返回图片的文字描述。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "可选：要查看的图片链接；留空则取最近收到的一张。"
+          },
+          "index": {
+            "type": "number",
+            "description": "可选：取最近图片缓冲里的第几条（从 0 起，默认最后一条）。"
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "qq_sticker_stats",
+      "tags": [
+        "read"
+      ],
+      "description": "查看已自动收藏的表情包统计：总数、按情感分布、最近若干条（含情感/用处/标签/文件名）。想给 QQ 回复发表情包图片时，先调本工具拿到真实文件名（返回里的 [表情包:xxx.jpg]），再把整段 [表情包:文件名] 写进回复文本即可自动发出；不要编造不存在的文件名。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "number",
+            "description": "返回几条，默认 10，最多 50。"
+          },
+          "query": {
+            "type": "string",
+            "description": "按情绪、场景、标签或图片备注检索，例如 开心、撒娇、无语、晚安；空则返回最近收藏。"
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "qq_proactive_status",
+      "tags": [
+        "read"
+      ],
+      "description": "查看主动说话调度器状态：运行态（暖场/稳定/静默）、今日已发/配额、各会话未回复与静默情况、最近主动说过的话。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "qq_proactive_trigger",
+      "tags": [
+        "speak"
+      ],
+      "description": "手动触发一次主动说话：随机挑一个可主动的监听会话（或指定 address 如 private:123）发一条闲聊。用于测试主动说话调度器。 使用前遵守最新 QQ 发送限制：对应回复开关必须开启，静默时须在独立白名单且有新消息待回复，连接就绪。关闭或被拦截后停止试发，等待状态恢复。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "可选：目标会话地址，如 private:123 / group:456；留空则随机。"
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "qq_qzone_post",
+      "tags": [
+        "speak"
+      ],
+      "description": "在 QQ 空间发一条动态（说说）。受运行暂停、直播屏蔽和作息静默限制；先查 qq_qzone_status，受限时等待，不要反复试发或声称已发。内容按「最近聊天 + 你对人或事的真实看法」自己生成：可省略 content 让它自动按对话与记忆发挥（topic 给方向，如“吐槽最近的天气/介绍某人”）；也可直接给 content 发你写好的。可附图片（images：file://、http(s):// 或 base64:// 链接）与 @人（ats：昵称或 QQ 号）。permission 默认 1=公开。返回 tid 供后续删除/回复。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "content": {
+            "type": "string",
+            "description": "动态正文；留空则自动生成（结合最近聊天与记忆，以第一人称发表看法/吐槽/简介）。"
+          },
+          "topic": {
+            "type": "string",
+            "description": "自动生成时的方向提示，如「吐槽最近的天气」「介绍一下小明」。"
+          },
+          "images": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "附图链接数组（file:// / http(s):// / base64://）。"
+          },
+          "ats": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "@的人：昵称或 QQ 号数组。"
+          },
+          "permission": {
+            "type": "number",
+            "description": "可见权限 ugc_right，默认 1=公开。"
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "qq_qzone_delete",
+      "tags": [
+        "speak"
+      ],
+      "description": "删除一条 QQ 空间动态。tid 来自 qq_qzone_post 的返回或 qq_qzone_status 的最近列表。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "tid": {
+            "type": "string",
+            "description": "要删除的动态 tid。"
+          }
+        },
+        "required": [
+          "tid"
+        ]
+      }
+    },
+    {
+      "name": "qq_qzone_reply",
+      "tags": [
+        "speak"
+      ],
+      "description": "回复某条动态下的一条评论。tid 为动态 id，comment_id 为评论 id（来自 QQ空间评论事件或你记忆里 qq_qzone_status 的互动记录）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "tid": {
+            "type": "string",
+            "description": "动态 tid。"
+          },
+          "comment_id": {
+            "type": "string",
+            "description": "评论 id。"
+          },
+          "content": {
+            "type": "string",
+            "description": "回复内容。"
+          }
+        },
+        "required": [
+          "tid",
+          "comment_id",
+          "content"
+        ]
+      }
+    },
+    {
+      "name": "qq_qzone_feeds",
+      "tags": [
+        "read"
+      ],
+      "description": "查看自己的 QQ 空间动态列表（尽力而为；依赖 QQ 协议端的 get_qzone_msg_list 是否支持）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "num": {
+            "type": "number",
+            "description": "返回条数，默认 5。"
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "qq_qzone_status",
+      "tags": [
+        "read"
+      ],
+      "description": "查看 QQ 空间发布限制、今日发布数/配额、自动回评和本地发布记录；本地记录不代表实时空间状态，实时动态请用 qq_qzone_feeds。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "qq_poke",
+      "tags": [
+        "speak"
+      ],
+      "description": "戳一戳某个人（群戳一戳或私聊戳一戳）。target 为会话地址 group:<群号> 或 private:<QQ号>（原样复制事件 meta 的 conv）；user 为要戳的人的 QQ 号或群内昵称（私聊戳一戳时留空表示戳对话对象）。这是一个动作而非文字消息。 使用前遵守最新 QQ 发送限制：对应回复开关必须开启，静默时须在独立白名单且有新消息待回复，连接就绪。关闭或被拦截后停止试发，等待状态恢复。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "会话地址，原样复制事件 meta 里的 conv 字段。"
+          },
+          "user": {
+            "type": "string",
+            "description": "要戳的人的 QQ 号或群内昵称；私聊戳一戳时留空表示戳对话对象。"
+          }
+        },
+        "required": [
+          "target"
+        ]
+      }
+    },
+    {
+      "name": "qq_reminder_add",
+      "tags": [
+        "speak"
+      ],
+      "description": "记一个定时提醒 / 闹钟（也是记事本）。把需要以后做的事、约定、待办记下，到点会自动在该会话提醒对方。when 支持：绝对 ISO 时间（如 2026-09-24T09:30）、\"HH:MM\"（今天，已过则明天）、\"明天 9:00\"、\"in 30m\" / \"30分钟后\" / \"2小时后\" / \"3天后\"。text 是提醒内容。address 默认就是当前会话（一般不用填）；scope 可填“这是谁的事 / 相关人”等备注。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "要提醒的内容，例如“提醒我三点开会”“和用户约好的事：明天还书”"
+          },
+          "when": {
+            "type": "string",
+            "description": "提醒时间，见上方描述里的格式（给一个未来的时间）"
+          },
+          "address": {
+            "type": "string",
+            "description": "可选，提醒发到哪个会话（group:群号 / private:QQ），默认当前会话"
+          },
+          "scope": {
+            "type": "string",
+            "description": "可选，备注（谁的事 / 相关人）"
+          }
+        },
+        "required": [
+          "text",
+          "when"
+        ]
+      }
+    },
+    {
+      "name": "qq_reminder_list",
+      "tags": [
+        "read"
+      ],
+      "description": "列出当前所有未触发的提醒 / 记事（闹钟清单），用于向用户汇报“你记了这些事”。返回每条的 id、内容、时间。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "qq_reminder_cancel",
+      "tags": [
+        "speak"
+      ],
+      "description": "取消 / 删除一条提醒（记事）。传要删的 id（来自 qq_reminder_list 或 add 时返回的 id）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "要取消的提醒 id"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      }
+    },
+    {
+      "name": "qq_affinity_adjust",
+      "tags": [
+        "speak"
+      ],
+      "description": "调整你对某个用户的好感度（关系分）。好感度是每个人独立的、可在正负间浮动的数字（范围 -100~100，初始 0=普通），做让人舒服/投缘的事就加，做让人反感/越界的事就减——不是只增不减。delta 为正数增加、负数减少（如 +5 / -10 / 20）。who 填对方 QQ 号（群聊里必须指定；私聊不填则默认对方）。reason 可选，记一笔这次加减的原因（会进好感度档案）。调整后好感度会随下一条该用户的消息自动注入对话上下文，影响你后续的态度与分寸。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "who": {
+            "type": "string",
+            "description": "对方 QQ 号（纯数字字符串）。群聊必填；私聊可省略（默认当前私聊对象）。"
+          },
+          "delta": {
+            "type": "number",
+            "description": "好感度变化量，正数加、负数减，如 5、-10、20"
+          },
+          "reason": {
+            "type": "string",
+            "description": "可选，这次加减的原因（如“帮我解决了个问题”“阴阳怪气了我”）"
+          }
+        },
+        "required": [
+          "delta"
+        ]
+      }
+    },
+    {
+      "name": "qq_affinity_get",
+      "tags": [
+        "read"
+      ],
+      "description": "查询某个用户当前的好感度（关系分）。who 填 QQ 号；省略则默认当前私聊对象（群聊需指定）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "who": {
+            "type": "string",
+            "description": "对方 QQ 号；群聊必填，私聊可省略"
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "qq_affinity_list",
+      "tags": [
+        "read"
+      ],
+      "description": "列出你对所有用户的好感度（关系分），按从高到低排序；用于了解“谁跟我现在关系好/不好”。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "qq_alias_set",
+      "tags": [
+        "write"
+      ],
+      "description": "记住一个「外号/代称 → QQ 号」的对应关系（长期记忆，跨重启保留）。之后用禁言、设头衔、戳一戳、好感度等工具时，who 直接填这个外号就能解析到对应的人。alias 填外号（如“阿强”“老板”），qq 填对方的 QQ 号。已存在同名外号会覆盖。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "alias": {
+            "type": "string",
+            "description": "外号/代称，例如“阿强”“老板”“那个总发广告的”"
+          },
+          "qq": {
+            "type": "string",
+            "description": "对应的真实 QQ 号（纯数字）"
+          }
+        },
+        "required": [
+          "alias",
+          "qq"
+        ]
+      }
+    },
+    {
+      "name": "qq_alias_forget",
+      "tags": [
+        "write"
+      ],
+      "description": "忘记一个外号对应关系（删除之前用 qq_alias_set 记的）。alias 填要删的外号。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "alias": {
+            "type": "string",
+            "description": "要忘记的外号/代称"
+          }
+        },
+        "required": [
+          "alias"
+        ]
+      }
+    },
+    {
+      "name": "qq_alias_list",
+      "tags": [
+        "read"
+      ],
+      "description": "列出当前记住的所有外号→QQ 对应关系。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "qq_note_save",
+      "tags": [
+        "write"
+      ],
+      "description": "把你想长期记住的东西写进「私人笔记本」——任何你（智能体）想记的事：对某个人的观感、一条约定、一个灵感、用户叮嘱的偏好、自己立下的小目标等。记忆插件(cortico-world-memory)启用时，笔记会进它的记忆库并常驻进你的环境提示词；没启用时落到本地笔记本文件。text 填要记的内容（尽量具体、自包含，日后回看能懂）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "要记的内容"
+          }
+        },
+        "required": [
+          "text"
+        ]
+      }
+    },
+    {
+      "name": "qq_note_list",
+      "tags": [
+        "read"
+      ],
+      "description": "列出私人笔记本里的全部条目（记忆插件模式下为记忆库 qq 域；本地模式下为 notebook.jsonl）。用于回看你记过什么。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "qq_note_get",
+      "tags": [
+        "read"
+      ],
+      "description": "按 id 查看某条笔记本内容。id 来自 qq_note_list 的编号/条目 id。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "条目 id"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      }
+    },
+    {
+      "name": "qq_note_forget",
+      "tags": [
+        "write"
+      ],
+      "description": "删除一条笔记本（你确定不再需要它时）。id 来自 qq_note_list 的编号/条目 id。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "条目 id"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      }
+    },
+    {
+      "name": "qq_admin_recall",
+      "tags": [
+        "write"
+      ],
+      "description": "【群管理员·可自主】撤回一条群消息。messageId 是要撤回消息的 message_id——它显示在每条群消息文本最开头、形如「#123456」的那个数字（把 # 后面的数字填进来即可）。仅群管理员/群主可撤回，且只能撤回近 2 分钟内的消息或自己发的消息。注意：授权指挥官（控制台白名单 / 群管理员 / 群主）能命令我撤回；此外 AI 自己判断需要撤回时也可自主执行。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "messageId": {
+            "type": "string",
+            "description": "要撤回的 message_id，可填纯数字或「#123456」形式"
+          },
+          "group": {
+            "type": "string",
+            "description": "可选，群号或 group:<群号>；不填则使用当前会话所在群"
+          }
+        },
+        "required": [
+          "messageId"
+        ]
+      }
+    },
+    {
+      "name": "qq_admin_at_all",
+      "tags": [
+        "write"
+      ],
+      "description": "【群管理员】在群里 @全体成员（需群主/管理员权限，且群开启允许 @全体成员）。text 为要附带的正文。 使用前遵守最新 QQ 发送限制：对应回复开关必须开启，静默时须在独立白名单且有新消息待回复，连接就绪。关闭或被拦截后停止试发，等待状态恢复。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "@全体时附带的正文内容"
+          },
+          "group": {
+            "type": "string",
+            "description": "群号或 group:<群号>；不填用当前会话所在群"
+          }
+        },
+        "required": [
+          "text"
+        ]
+      }
+    },
+    {
+      "name": "qq_admin_notice",
+      "tags": [
+        "write"
+      ],
+      "description": "【群管理员】发布群通知（群公告）。content 为公告正文。部分 NapCat 版本 action 名为 send_group_notice，若失败可在控制台把 worlds.qqbot.admin.noticeAction 改成 _send_group_notice。 使用前遵守最新 QQ 发送限制：对应回复开关必须开启，静默时须在独立白名单且有新消息待回复，连接就绪。关闭或被拦截后停止试发，等待状态恢复。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "content": {
+            "type": "string",
+            "description": "群通知/公告正文"
+          },
+          "group": {
+            "type": "string",
+            "description": "群号或 group:<群号>；不填用当前会话所在群"
+          }
+        },
+        "required": [
+          "content"
+        ]
+      }
+    },
+    {
+      "name": "qq_admin_join_list",
+      "tags": [
+        "read"
+      ],
+      "description": "【群管理员】列出当前待审核的加群请求（bot 收到的加群申请/邀请）。返回每条的 flag（审批用）、群号、申请人 QQ、留言。",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "qq_admin_join_approve",
+      "tags": [
+        "write"
+      ],
+      "description": "【群管理员】通过一条加群请求。flag 来自 qq_admin_join_list（如 #xxx 的 # 后部分，或直接贴完整 flag 字符串）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "flag": {
+            "type": "string",
+            "description": "加群请求 flag（qq_admin_join_list 给出的 # 后字符串，或直接贴原 flag）"
+          }
+        },
+        "required": [
+          "flag"
+        ]
+      }
+    },
+    {
+      "name": "qq_admin_join_reject",
+      "tags": [
+        "write"
+      ],
+      "description": "【群管理员】拒绝一条加群请求。flag 来自 qq_admin_join_list；reason 为拒绝理由（可选，会通知申请人）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "flag": {
+            "type": "string",
+            "description": "加群请求 flag"
+          },
+          "reason": {
+            "type": "string",
+            "description": "拒绝理由（可选）"
+          }
+        },
+        "required": [
+          "flag"
+        ]
+      }
+    },
+    {
+      "name": "qq_admin_title",
+      "tags": [
+        "write"
+      ],
+      "description": "【群管理员】给某成员设置群专属头衔（special title）。当用户说\"给 xx 设个头衔/称号\"等要求时使用。who 填昵称、QQ 号或外号；省略则默认针对最近被引用或 @ 提及的人（群聊里用户说\"给他设个头衔\"时不填 who 也能用）。title 为头衔内容（空字符串则清除头衔）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "who": {
+            "type": "string",
+            "description": "成员昵称、QQ 号或外号；不填则默认针对最近被引用/@ 提及的人"
+          },
+          "title": {
+            "type": "string",
+            "description": "要设置的群头衔（空字符串清除）"
+          },
+          "group": {
+            "type": "string",
+            "description": "群号或 group:<群号>；不填用当前会话所在群"
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "qq_admin_ban",
+      "tags": [
+        "write"
+      ],
+      "description": "【群管理员·需授权】禁言/解禁某成员。当用户要求\"禁言 xx/让他闭嘴/解禁 xx\"等时使用。who 填昵称、QQ 号或外号；省略则默认针对最近被引用或 @ 提及的人（群聊里用户说\"把他禁言\"时不填 who 也能用）。durationSec 为禁言秒数（默认 600，即 10 分钟；0 表示解除禁言）。注意：只有授权指挥官（控制台白名单 / 群管理员 / 群主）能命令我禁言，普通成员不行；且群主、其他管理员受保护。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "who": {
+            "type": "string",
+            "description": "成员昵称、QQ 号或外号；不填则默认针对最近被引用/@ 提及的人"
+          },
+          "durationSec": {
+            "type": "number",
+            "description": "禁言时长（秒），默认 600，0=解禁"
+          },
+          "group": {
+            "type": "string",
+            "description": "群号或 group:<群号>；不填用当前会话所在群"
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "qq_admin_ban_all",
+      "tags": [
+        "write"
+      ],
+      "description": "【群管理员】全员禁言开关。enable=true 开启全员禁言（仅群主/管理员可发言），false 关闭。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "enable": {
+            "type": "boolean",
+            "description": "true=开启全员禁言，false=关闭"
+          },
+          "group": {
+            "type": "string",
+            "description": "群号或 group:<群号>；不填用当前会话所在群"
+          }
+        },
+        "required": [
+          "enable"
+        ]
+      }
+    },
+    {
+      "name": "qq_admin_kick",
+      "tags": [
+        "write"
+      ],
+      "description": "【群管理员·需授权】把某成员踢出群聊（踢人/飞机票）。当用户要求\"把 xx 踢了/踢出群/清理出去\"等时使用。who 填昵称、QQ 号或外号；省略则默认针对最近被引用或 @ 提及的人（群聊里用户说\"把他踢了\"时不填 who 也能用）。rejectRejoin=true（默认）表示踢出并拒绝其再次加群，false 则只踢出、对方仍可重新申请。注意：踢人比禁言更重且不可逆，只有授权指挥官（控制台白名单 / 群管理员 / 群主）能命令我执行，默认 AI 不能自主踢人（控制台开启 admin.allowSelfKick 可放行）；群主、其他管理员受保护，不能踢自己。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "who": {
+            "type": "string",
+            "description": "成员昵称、QQ 号或外号；不填则默认针对最近被引用/@ 提及的人"
+          },
+          "rejectRejoin": {
+            "type": "boolean",
+            "description": "true=踢出并拒绝再次加群（默认），false=仅踢出"
+          },
+          "group": {
+            "type": "string",
+            "description": "群号或 group:<群号>；不填用当前会话所在群"
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "qq_voicecall",
+      "tags": [
+        "write"
+      ],
+      "description": "【语音通话(模拟)】接听或挂断一路“打电话”语音会话。action=\"start\" 向某会话发起/接听语音通话（需控制台开启 call.enabled 且本地语音模型已就绪）；action=\"end\" 主动挂断当前通话；action=\"status\" 查看通话状态。to 填 \"group:<群号>\" 或 \"private:<QQ号>\"。注：OneBot/NapCat 无法真正接听系统级 QQ 电话，这是用语音消息模拟的实时听说会话（你说话→我转写→我回复→我分句流式念出来）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "start=发起/接听通话，end=挂断，status=查看状态"
+          },
+          "to": {
+            "type": "string",
+            "description": "目标会话 group:<群号> 或 private:<QQ号>；不填则无法发起/挂断（status 可不填）"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      }
+    },
+    {
+      "name": "qq_recent",
+      "tags": [
+        "read"
+      ],
+      "description": "查询监听名单内且回复开关开启的群或私聊最近消息及当前发送限制（按原发送时间显示）。没有历史消息不代表私聊关闭；读取开放时可按发送限制使用 qq_send 联系。关闭的会话不可读取，等待用户重新开启。参数 group 为群号；查私聊时改用 peer。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "group": {
+            "type": "number",
+            "description": "群号；与 peer 二选一。"
+          },
+          "peer": {
+            "type": "number",
+            "description": "私聊对方 QQ；与 group 二选一。"
+          },
+          "minutes": {
+            "type": "number",
+            "description": "回溯时间窗（分钟），默认 60。"
+          },
+          "limit": {
+            "type": "number",
+            "description": "最多返回条数，默认 30。"
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "qq_search",
+      "tags": [
+        "read"
+      ],
+      "description": "在当前允许读取的 QQ 会话中按关键词检索历史消息，返回匹配片段及上下文。回复开关关闭或名单外的会话不会返回。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "keyword": {
+            "type": "string",
+            "description": "不区分大小写的包含匹配关键词。"
+          },
+          "limit": {
+            "type": "number",
+            "description": "最多返回的命中组数，默认 10。"
+          }
+        },
+        "required": [
+          "keyword"
+        ]
+      }
+    },
+    {
+      "name": "qq_sticker_sync",
+      "tags": [
+        "write"
+      ],
+      "description": "同步当前 QQ 账号的收藏表情到本地表情库，并识别情绪和适用场景。账号新加收藏后调用；不向任何会话发送消息。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "qq_send_audio",
+      "tags": [
+        "speak"
+      ],
+      "description": "发送独立 tts_synthesize 生成的语音附件。handle 可为 log: 或用 save_blob 保存的 mem: 句柄；不会自动拨打电话。 使用前遵守最新 QQ 发送限制：对应回复开关必须开启，静默时须在独立白名单且有新消息待回复，连接就绪。关闭或被拦截后停止试发，等待状态恢复。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "to": {
+            "type": "string"
+          },
+          "handle": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "to",
+          "handle"
+        ],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "events": [
+    {
+      "type": "system",
+      "description": "QQ platform event or current capability status."
+    },
+    {
+      "type": "qq.message",
+      "description": "QQ platform event or current capability status."
+    },
+    {
+      "type": "qqbot.output",
+      "description": "QQ platform event or current capability status."
+    },
+    {
+      "type": "qq.send_policy",
+      "description": "QQ platform event or current capability status."
+    },
+    {
+      "type": "qq.group-request",
+      "description": "QQ platform event or current capability status."
+    },
+    {
+      "type": "qq.recall",
+      "description": "QQ platform event or current capability status."
+    },
+    {
+      "type": "qq.member",
+      "description": "QQ platform event or current capability status."
+    },
+    {
+      "type": "qq.poke",
+      "description": "QQ platform event or current capability status."
+    },
+    {
+      "type": "qq.react",
+      "description": "QQ platform event or current capability status."
+    },
+    {
+      "type": "qq.forward",
+      "description": "QQ platform event or current capability status."
+    },
+    {
+      "type": "qq.affinity",
+      "description": "QQ platform event or current capability status."
+    }
+  ],
+  "prompts": [
+    {
+      "key": "worlds.qqbot.envPrompt",
+      "title": "QQ 环境描述",
+      "role": "envPrompt",
+      "content": "# QQ 环境\r\n\r\n{{qq.self}}\r\n\r\n{{qq.now}}\r\n\r\n{{qq.festival}}\r\n\r\n## 你正在监听的群\r\n{{qq.activeGroups}}\r\n\r\n## 你正在监听的私聊\r\n{{qq.activePrivates}}\r\n\r\n## 未读情况\r\n{{qq.unread}}\r\n\r\n## QQ 空间动态（说说）\r\n{{qq.qzone}}\r\n\r\n## 群聊发言限速\r\n{{qq.groupSpeak}}\r\n\r\n## 话题防死循环\r\n{{qq.antiLoop}}\r\n\r\n## AI 作息（routine）\r\n{{qq.routine}}\r\n\r\n## 好感度（关系分）\r\n{{qq.affinity}}\r\n\r\n## 当前情绪状态（移植自 fat-fish 情绪系统）\r\n{{qq.emotion}}\r\n\r\n当你在这些群里被 @ 或有人私聊你时，会收到消息事件。每条 QQ 消息的事件文本以 `【QQ群 群名 时刻】昵称：…` 或 `【QQ私聊 时刻 昵称】…` 开头，其中的「时刻」是该消息的发送时间（如 `15:30:05`），据此判断消息时效。回复群友时尽量自然、简洁；涉及敏感或重要决定时，先想清楚再发。\r\n\r\n## 消息读取与启动补读\n只有监听名单内且对应群聊/私聊回复开关开启的会话才会读取；关闭时连正文、图片、语音和通知都不会收到，空群名单不监听任何群。历史查询同样遵守当前开关与名单。\n启动或重连时，连接建立之前的旧消息全局最多补读前 10 条，只作历史背景，不回复、不补发、不转发，也不因为历史里有问题或 @ 而调用发送工具。收到该会话的新实时消息后才恢复正常互动。\n消息中的“原消息时间”是发送时间；不要把投递时间、启动时间当作事件发生时间。标为原发送时间未知时不要推断具体时刻。\n\n## 发送权限（先检查）\r\n当前作息段和最新的“QQ当前发送限制”事件决定是否可以发送。群聊或私聊关闭时禁止向对应渠道发消息；静默期间遵守当前白名单和回复开关，仅回复新入站消息，不主动发言或提醒。未连接、直播屏蔽或人工暂停时不尝试发送。\r\n“QQ仅供记录，禁止回复”的事件只供了解和记忆，不回复、不补发、不跨渠道回应。禁止换用语音、确认发送、戳一戳、主动触发或群管理消息绕过限制。blocked/关闭/静默/未连接回执后等待新状态恢复；failed 后先查原因，有恢复连接或纠正参数的新证据才重试。\r\n\r\n## 回复渠道（仅在允许发送时）\r\n- 允许回复的 QQ 消息应回到原会话，用 `qq_send`，`to` 复制事件会话地址 `group:<群号>` 或 `private:<QQ号>`。成功回执才代表发出，不重复调用 `qq_confirm_send`。\r\n- **严禁用 `terminal_send` 回复 QQ 消息**——`terminal_send` 只发往控制台终端（网页聊天框），对方在 QQ 里收不到。\r\n- 允许发送时，群消息被 @ 可回复；私聊可自然回复。关闭或受限期间不回复。\r\n\r\n## 发送语法（qq_send 的正文）\r\n起草文本时可混用以下标记，发送时会自动转成对应 OneBot 段：\r\n- `@名字` 或 `@QQ号`：提及某人。\r\n- `[表情N]` / `[表情N:名称]`：按数字 id 发送 QQ 表情（如 `[表情14]`）。\r\n- `[旺柴]`、`[笑哭]`、`[调皮]` 等中文表情名：自动映射到对应表情 id（与 fat-fish 一致）。\r\n- `[表情包:文件名]`：发送本地表情包图片，文件需放在「表情包目录」配置所指位置（如 `emoji/Dog.png`）；文件不存在则该标记被丢弃，不报错。\r\n- 表情包来自聊天收藏和当前 QQ 账号的收藏表情。聊天里合适时可自然地用表情包表达情绪、回应玩笑或问候，不必每条都发。先用 `qq_sticker_stats` 的 `query` 按情绪或场景检索，选符合当前语境的图片，把返回的完整 `[表情包:文件名]` 放进 `qq_send` 正文，也可单独发这段标记。文件名必须来自工具返回；标签是图片识别结果，要结合语境判断。\r\n- 账号新加收藏后可调用 `qq_sticker_sync` 同步，再用 `qq_sticker_stats` 选图。没有匹配时换关键词或不填 `query` 查看最近收藏。\r\n- 纯文本按句号/问号/感叹号/分号/换行自动拆成多条消息发送（可在控制台关掉「按句拆分发送」）；多条之间按「发送间隔」限速，防止触发风控。\r\n\r\n## 语音能力（voice）\r\n{{qq.voice}}\r\n"
+    }
+  ]
+}

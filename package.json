@@ -1,0 +1,86 @@
+{
+  "name": "cortico-world-qq-promax",
+  "version": "0.1.1",
+  "description": "QQ ProMAX: Cortico QQ 私聊、群聊、空间和语音扩展，支持 OneBot v11 / SnowLuma / NapCat。",
+  "type": "module",
+  "main": "./src/index.ts",
+  "license": "AGPL-3.0-or-later",
+  "keywords": [
+    "cortico-world",
+    "cortico",
+    "qq",
+    "onebot",
+    "snowluma",
+    "napcat",
+    "qq-promax"
+  ],
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "files": [
+    "src",
+    "dist/webui.js",
+    "ENV_PROMPT.md",
+    "asr_sidecar.py",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "README.md",
+    "CHANGELOG.md",
+    "describe.json"
+  ],
+  "cortico": {
+    "kind": "world",
+    "api": 6,
+    "displayName": "QQ ProMAX",
+    "webUiClient": "dist/webui.js",
+    "describe": "describe.json",
+    "tags": [
+      "im",
+      "qq",
+      "voice",
+      "memory",
+      "local",
+      "external-setup",
+      "internal-state",
+      "unsafe",
+      "sensitive-data",
+      "unofficial-api",
+      "experimental"
+    ],
+    "locales": {
+      "zh": {
+        "displayName": "QQ ProMAX"
+      },
+      "en": {
+        "displayName": "QQ ProMAX"
+      }
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "cortico": "0.2.2",
+    "tsx": "^4.19.2",
+    "esbuild": "^0.28.1"
+  },
+  "os": [
+    "win32"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Kpect10086/QQ-ProMAX.git"
+  },
+  "homepage": "https://github.com/Kpect10086/QQ-ProMAX#readme",
+  "bugs": {
+    "url": "https://github.com/Kpect10086/QQ-ProMAX/issues"
+  },
+  "scripts": {
+    "test": "node --import tsx tests/smoke.mjs",
+    "build:web": "esbuild src/console/client.ts --bundle --format=esm --outfile=dist/webui.js"
+  }
+}

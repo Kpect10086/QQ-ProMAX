@@ -1,0 +1,7 @@
+node_modules/
+fixture-data/
+.env
+.env.*
+.npmrc
+*.log
+*.tgz
