@@ -101,6 +101,8 @@ export type ChatMsg = { role: 'system' | 'user' | 'assistant'; content: string }
 type AddrState = {
   firstSeen: number;
   lastSent: number;
+  lastActivity?: number;
+  activityVersion?: number;
   unreplied: number;
   silentUntil: number;
   state: 'warmup' | 'stable' | 'silent';
@@ -122,7 +124,7 @@ export class ProactiveSpeaker {
   private readonly dataDir: string;
   private readonly stateFile: string;
   private readonly generate: (messages: ChatMsg[]) => Promise<string | null>;
-  private readonly send: (address: string, text: string) => Promise<string>;
+  private readonly send: (address: string, text: string, isCurrent?: () => boolean) => Promise<string>;
   private readonly getTargets: () => ProactiveTarget[];
   private readonly isPaused?: () => boolean;
   private readonly isQuiet?: () => boolean;
@@ -132,6 +134,7 @@ export class ProactiveSpeaker {
   private readonly selfName: string;
 
   private readonly states = new Map<string, AddrState>();
+  private readonly generating = new Set<string>();
   private recent: string[] = [];
   private dailyCount = 0;
   private dayStart = startOfDay();
@@ -146,7 +149,7 @@ export class ProactiveSpeaker {
     log: Logger;
     dataDir: string;
     generate: (messages: ChatMsg[]) => Promise<string | null>;
-    send: (address: string, text: string) => Promise<string>;
+    send: (address: string, text: string, isCurrent?: () => boolean) => Promise<string>;
     getTargets: () => ProactiveTarget[];
     /** 总开关是否暂停；提供时暂停则 tick 直接停手。 */
     isPaused?: () => boolean;
@@ -192,11 +195,20 @@ export class ProactiveSpeaker {
 
   /** 收到对方消息时调用：重置该会话的未回复计数并解除静默。 */
   notifyReply(address: string): void {
-    const s = this.states.get(address);
-    if (!s) return;
+    const s = this.ensure(address);
+    s.lastActivity = Date.now();
+    s.activityVersion = (s.activityVersion ?? 0) + 1;
     s.unreplied = 0;
     s.silentUntil = 0;
     if (s.state === 'silent') s.state = 'stable';
+    this.save();
+  }
+
+  notifySent(address: string, at = Date.now()): void {
+    const s = this.ensure(address);
+    s.lastSent = Math.max(s.lastSent, at);
+    s.activityVersion = (s.activityVersion ?? 0) + 1;
+    this.save();
   }
 
   status(targets = this.getTargets().length): ProactiveStatus {
@@ -225,7 +237,7 @@ export class ProactiveSpeaker {
     if (!pick) pick = this.pickRandom(targets);
     if (!pick) return '当前没有可主动说话的监听会话（检查 groups/privates 与 mode）。';
     const ok = await this.emit(pick, true);
-    return ok ? `已向 ${pick.label} 主动发送一条消息。` : '本次未发送（发送限制或生成失败）。';
+    return ok ? `已向 ${pick.label} 主动发送一条消息。` : '本次未发送（选择保持安静、发送限制或生成失败）。';
   }
 
   private async tick(): Promise<void> {
@@ -264,7 +276,7 @@ export class ProactiveSpeaker {
       const cooldown = t.kind === 'private' ? this.cfg.privateCooldownSec : this.cfg.groupCooldownSec;
       if (st === 'silent') continue;
       if (this.cfg.dailyQuota > 0 && this.dailyCount >= this.cfg.dailyQuota) continue;
-      if (Date.now() - s.lastSent < cooldown * 1000) continue;
+      if (Date.now() - Math.max(s.lastSent, s.lastActivity ?? 0) < cooldown * 1000) continue;
 
       let p: number;
       if (st === 'warmup') {
@@ -283,43 +295,53 @@ export class ProactiveSpeaker {
 
   private async emit(t: ProactiveTarget, forced: boolean): Promise<boolean> {
     if (this.isPaused?.() || this.isQuiet?.()) return false;
-    const prompt = this.buildUserPrompt(t, forced);
-    const system = this.systemPromptFor ? this.systemPromptFor(t) : this.cfg.systemPrompt;
-    const text = await this.generate([
-      { role: 'system', content: system },
-      { role: 'user', content: prompt },
-    ]);
-    if (!text || !text.trim()) {
-      this.log.warn('主动消息生成失败', { address: t.address });
-      return false;
-    }
-    const clean = text.trim();
-    // 内容去重：最近若干条里出现过则跳过（除非强制触发）
-    if (!forced && this.recent.includes(clean)) {
-      this.log.info('主动消息命中去重，跳过', { address: t.address });
-      return false;
-    }
-    // 话题相似度：与近期已发内容过于相似则跳过（除非强制触发），防同一话题反复换汤不换药造成死循环
-    if (!forced && this.cfg.topicSimilarity > 0) {
-      const maxSim = this.recent.reduce((m, r) => Math.max(m, this.similarity(clean, r)), 0);
-      if (maxSim > this.cfg.topicSimilarity) {
-        this.log.info('主动消息与近期话题过于相似，跳过', { address: t.address, similarity: maxSim.toFixed(2) });
-        this.pushRecent(clean);
+    if (this.generating.has(t.address)) return false;
+    this.generating.add(t.address);
+    try {
+      const activity = this.ensure(t.address).activityVersion ?? 0;
+      const prompt = this.buildUserPrompt(t, forced);
+      const system = this.systemPromptFor ? this.systemPromptFor(t) : this.cfg.systemPrompt;
+      const text = await this.generate([
+        { role: 'system', content: system },
+        { role: 'user', content: prompt },
+      ]);
+      if (text === null) {
+        this.log.warn('主动消息生成失败', { address: t.address });
         return false;
       }
-    }
-    if (this.isPaused?.() || this.isQuiet?.()) return false;
-    const res = await this.send(t.address, clean);
-    if (res.startsWith('[send blocked]') || res.startsWith('[send failed]')) return false;
-    const s = this.ensure(t.address);
-    s.lastSent = Date.now();
-    s.unreplied += 1;
-    if (s.state === 'warmup' && !this.firstMessageSent) this.firstMessageSent = true;
-    this.pushRecent(clean);
-    this.dailyCount += 1;
-    this.save();
-    this.log.info('已主动发送', { address: t.address, label: t.label, unreplied: s.unreplied, res: res.slice(0, 40) });
-    return true;
+      const clean = text.trim();
+      if (!clean) return false;
+      // 内容去重：最近若干条里出现过则跳过（除非强制触发）
+      if (!forced && this.recent.includes(clean)) {
+        this.log.info('主动消息命中去重，跳过', { address: t.address });
+        return false;
+      }
+      // 话题相似度：与近期已发内容过于相似则跳过（除非强制触发），防同一话题反复换汤不换药造成死循环
+      if (!forced && this.cfg.topicSimilarity > 0) {
+        const maxSim = this.recent.reduce((m, r) => Math.max(m, this.similarity(clean, r)), 0);
+        if (maxSim > this.cfg.topicSimilarity) {
+          this.log.info('主动消息与近期话题过于相似，跳过', { address: t.address, similarity: maxSim.toFixed(2) });
+          this.pushRecent(clean);
+          return false;
+        }
+      }
+      if (this.isPaused?.() || this.isQuiet?.()) return false;
+      if ((this.ensure(t.address).activityVersion ?? 0) !== activity) {
+        this.log.info('主动草稿生成期间会话已更新，丢弃旧草稿', {address: t.address});
+        return false;
+      }
+      const res = await this.send(t.address, clean, () => (this.ensure(t.address).activityVersion ?? 0) === activity);
+      if (res.startsWith('[send blocked]') || res.startsWith('[send failed]')) return false;
+      const s = this.ensure(t.address);
+      s.lastSent = Date.now();
+      s.unreplied += 1;
+      if (s.state === 'warmup' && !this.firstMessageSent) this.firstMessageSent = true;
+      this.pushRecent(clean);
+      this.dailyCount += 1;
+      this.save();
+      this.log.info('已主动发送', { address: t.address, label: t.label, unreplied: s.unreplied, res: res.slice(0, 40) });
+      return true;
+    } finally {this.generating.delete(t.address);}
   }
 
   private evalState(s: AddrState): 'warmup' | 'stable' | 'silent' {
@@ -350,14 +372,13 @@ export class ProactiveSpeaker {
     const who = this.cfg.withNickname
       ? (t.kind === 'private' ? `私聊「${t.label}」` : `群「${t.label}」`)
       : (t.kind === 'private' ? '你正在私聊的对象' : '你正在群聊里的对象');
-    const hint = forced ? '（这是被手动触发的主动发言，务必说点有意思的）' : '';
-    const avoid = this.recent.length ? `\n不要和之前说过的内容重复：\n- ${this.recent.slice(-5).join('\n- ')}` : '';
+    const hint = forced ? '（这是手动邀请你考虑开口，仍可保持安静。）' : '';
     // 作息提示：午休段让主动冒泡更简短自然（睡眠段已在 tick 里被拦下，不会走到这里）。
     let routineNote = '';
     if (this.routine?.enabled && routineSegment(this.routine) === 'lazy') {
       routineNote = `\n（当前是${this.selfName}的午休/打盹时段，简短点更自然，别太耗能。）`;
     }
-    return `现在是 ${hh}:${mm}。你要主动向${who}说一句话（闲聊/关心/抛个话题都行，别太生硬，也别太长，一两句即可）。${hint}${avoid}${routineNote}\n\n注意：只聊系统提示里「真实对话」里出现过的事；如果没什么可接的，就泛泛关心/问候，或返回空（什么都不说）。绝不要编造没发生过的事件或细节。`;
+    return `现在是 ${hh}:${mm}。你可以主动向${who}分享一个此刻值得说的想法，也可以保持安静。${hint}${routineNote}\n\n先看这个会话最后是谁说话、对方有没有接话，以及旧话题是否已经结束。已有问候或问题未获回应、又没有新的内容时，选择不发。已经处理的临时要求、确认过的规则，不追问进展也不重新点评来续话。不要用换一种说法的早安、吃饭睡觉提醒或“不打扰”续发消息。\n\n有话想说时，围绕真实对话中一个仍有意思的细节，表达自己的感受、看法或好奇，给对方留接话空间；长短随内容，不必凑提问或照顾人的结尾。事实只依据有来源的记录，旧的临时请求不是今天仍待执行的任务，不能编造自己的经历、操作或约定。只返回 JSON {"text":"本次正文"}；不发时返回 {"text":""}，不要把“空”或沉默说明写进正文。`;
   }
 
   /** 时段切换时，向所有可主动说话的会话播报一句（去睡/醒/午休）。文案由 LLM 现场生成（带记忆），每次说法不固定；生成失败才回退到配置里的固定文案。 */
@@ -374,11 +395,12 @@ export class ProactiveSpeaker {
       const system = this.systemPromptFor ? this.systemPromptFor(t) : this.cfg.systemPrompt;
       const userPrompt =
         `【作息播报·${scene}】现在是我作息时段切换的时刻（从「${prev}」切到「${seg}」）。` +
-        `请直接用你自己的口吻、自然地说一句这种场景下的话（比如${scene}时的随口感慨或碎碎念），一两句即可，别太长别太正式。` +
-        `每次可以换种说法，不要每次都一模一样，也不要念固定套话。不要加「在吗」、不要客服腔。`;
+        `可以用你自己的口吻分享这种场景下的随口感慨，长短随内容。` +
+        `时段变化不代表对方需要收到通知。先看本会话的时间和说话人，已有消息未获回应、又没有新内容时选择不发；不靠换一种问候重复搭话。只返回 JSON {"text":"正文"}；不发时返回 {"text":""}。不要加「在吗」、不要客服腔。`;
       let line = '';
       try {
         const gen = await this.generate([{ role: 'system', content: system }, { role: 'user', content: userPrompt }]);
+        if (gen !== null && !gen.trim()) continue;
         line = (gen ?? '').trim();
       } catch (e) {
         this.log.warn('作息播报生成失败，回退固定文案', { address: t.address, err: String(e) });

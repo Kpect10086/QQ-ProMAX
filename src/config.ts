@@ -34,7 +34,7 @@ export interface QQCallConfig {
   initTimeoutSec: number;
   /** 通话模式：simulated=基于语音消息的模拟（OneBot，默认，零风险，无需动真实 QQ 客户端）；system=系统级真接电话（动真实 QQ 客户端+系统音频桥，受 answerMethod 控制）。OneBot/NapCat 拿不到系统级电话的来电事件，system 模式需配合 LiteLoader/CUA 接听与音频桥使用。 */
   mode: 'simulated' | 'system';
-  /** 系统级真接电话的接听手段（仅 mode=system 生效）：liteloader=用 LiteLoaderQQNT 插件监听来电并自动接听+切虚拟麦克风；cua=用本机桥接听来电；auto=优先 liteloader（装了就用），否则退化 cua。 */
+  /** 系统级真接电话的接听手段（仅 mode=system 生效）：liteloader=用 LiteLoaderQQNT 插件监听来电并自动接听+切虚拟麦克风；cua=用桌宠(cortico-world-cua)视觉识别来电弹窗点击接听；auto=优先 liteloader（装了就用），否则退化 cua。 */
   answerMethod: 'liteloader' | 'cua' | 'auto';
   /** 系统级真接电话的音频桥服务地址（audio_bridge_poc/call_bridge.py 的 HTTP 地址）。mode=system 时 TTS 经它喂给 CABLE，对方声音经它从 WASAPI Loopback 抓取。 */
   bridgeUrl: string;
@@ -44,7 +44,8 @@ export interface QQCallConfig {
   bridgePython: string;
 }
 
-/** 语音识别（ASR）共享配置：语音收发（收语音）与语音通话（听写）共用同一套 ASR，避免重复配置。
+
+/** 语音识别（ASR）共享配置：语音收发（收语音）用同一套 ASR，避免重复配置。
  *  实现由 asrLocalEngine 决定（侧车 asr_sidecar.py 的 load_engine 分支），类型开放为 string，新增引擎无需改类型。
  *  默认 local + funasr（SenseVoiceSmall，中文更准，自动从 ModelScope 下载），后续可切 228MB 的 sherpa-onnx 版。 */
 export interface QQAsrConfig {
@@ -74,6 +75,7 @@ export interface QQAsrConfig {
 }
 
 export interface QQWorldConfig {
+  whoAmITalkingTo?: string;
   contentReviewUrl: string;
   generationInstructionFile: string;
   directorStatusFile: string;
@@ -219,7 +221,7 @@ export interface QQWorldConfig {
    *  - 留空（默认）：回退到登录 QQ 昵称，再不行回退「我」。
    *  - 填了：强制用这个值（如「小鱼」），换称呼零改码。 */
   selfName: string;
-  /** 语音收发：发语音(TTS)+收语音(ASR)。ASR 统一走顶层 asr.* 配置（与语音通话共用同一引擎，默认 funasr），
+  /** 语音收发：发语音(TTS)+收语音(ASR)。ASR 统一走顶层 asr.* 配置（共享识别引擎，默认 funasr），
    *  此处只管 TTS 与供应商选择；实现由 voice.ts 注册表供应商决定（当前内置 native/custom/local/voxcpm，可扩展）。 */
   voice: {
     /** 总开关。 */
@@ -263,7 +265,7 @@ export interface QQWorldConfig {
     /** VoxCPM 随机种子（0=随机，>0 固定可复现）。 */
     voxcpmSeed: number;
   };
-  /** 语音识别（ASR）共享配置：语音收发（收语音）与语音通话（听写）共用同一套 ASR，避免重复配置。
+  /** 语音识别（ASR）共享配置：语音收发（收语音）用同一套 ASR，避免重复配置。
    *  默认 local + funasr（SenseVoiceSmall，中文更准，自动从 ModelScope 下载）；后续可切 228MB 的 sherpa-onnx 版（更省内存）。 */
   asr: QQAsrConfig;
   /** VoxCPM 侧车自拉起：provider=voxcpm 且本机没有常驻 vox_tts_server.py 时，由本扩展负责拉起独立 venv_vox 子进程。与 fat-fish 主 bot 的 tts_vox 守护二选一，避免重复抢显存。 */
@@ -357,9 +359,13 @@ export const QQ_DEFAULTS: QQWorldConfig = {
   mode: 'reverse',
   allowPrivateRedirect: true,
   wsUrl: 'ws://127.0.0.1:3001',
-  wsHost: '0.0.0.0',
+  // 反向监听默认只绑回环：绑 0.0.0.0 会让同网段任何机器都能连进来，
+  // 拿到 bot 要发的消息、伪造事件，甚至借群管鉴权接口越权。要对外监听请显式改这一项。
+  wsHost: '127.0.0.1',
   wsPort: 8080,
   wsPath: '/onebot/v11/ws',
+  // 反向模式下留空会自动生成并持久化一个随机 token（见 world.ts 的 ensureReverseToken），
+  // 不会退化成「无鉴权监听」。正向连接留空表示不校验。
   token: '',
   groups: [],
   privates: [],
@@ -393,8 +399,8 @@ export const QQ_DEFAULTS: QQWorldConfig = {
     mode: 'private',
     systemPrompt:
       '你要主动找对方说话（不是回复，是主动冒泡）。' +
-      '说点自然、轻松、像真人在摸鱼时随手发的闲聊：关心一下、抛个小话题、分享点碎碎念都行。' +
-      '一两句就够，别太长别太正式，别用「请问/您好」这种客服腔，也别每条都问「在吗」。',
+      '从真实对话里挑一个仍有意思的细节，分享自己的看法、感受或好奇，语气自然，长短随内容。' +
+      '已有消息没有得到回应、又没有新的内容时，可以保持安静，返回 JSON {"text":""}。',
     endpoint: 'https://openrouter.ai/api/v1',
     apiKeySecret: 'OPENROUTER_API_KEY',
     model: 'google/gemini-2.5-flash',
@@ -493,18 +499,7 @@ export const QQ_DEFAULTS: QQWorldConfig = {
     voxcpmTimesteps: 10,
     voxcpmSeed: 0,
   },
-  // VoxCPM 侧车自拉起（仅在 provider=voxcpm 且无其它进程管理侧车时开启）
-  voxcpmSidecar: {
-    enabled: false,
-    venv: '',
-    python: '',
-    script: '',
-    modelDir: '',
-    ffmpeg: '',
-    logFile: '',
-    startupTimeoutSec: 240,
-  },
-  // 语音识别（ASR）共享配置：语音收发（收语音）与语音通话（听写）共用同一套 ASR。默认 local + funasr。
+  // 语音识别（ASR）共享配置：语音收发（收语音）用同一套 ASR。默认 local + funasr。
   asr: {
     mode: 'local',
     localEngine: 'funasr',
@@ -551,6 +546,17 @@ export const QQ_DEFAULTS: QQWorldConfig = {
     allowSelfKick: false,
     kickRejectRejoin: true,
   },
+
+voxcpmSidecar: {
+    enabled: false,
+    venv: '',
+    python: '',
+    script: '',
+    modelDir: '',
+    ffmpeg: '',
+    logFile: '',
+    startupTimeoutSec: 240,
+  },
 };
 
 export const QQ_SECRETS = ['QQ_ACCESS_TOKEN', 'OPENROUTER_API_KEY', 'DEEPSEEK_API_KEY', 'VOICE_API_KEY'];
@@ -571,8 +577,8 @@ export const QQ_CONFIG_GROUP: ConfigGroup = {
     title: 'QQ · 连接与监听',
     description: 'OneBot v11 连接参数与监听名单，支持 SnowLuma 等协议端；连接类改动需重启生效。',
     properties: {
-      'worlds.qqbot.replyGroups': {type: 'boolean', title: '回复群聊', 'x-hot': true, default: true, description: '关闭后不读取群消息、图片、语音和通知，也不发送；排队消息实际投递前重新核对。'},
-      'worlds.qqbot.replyPrivates': {type: 'boolean', title: '回复私聊', 'x-hot': true, default: true, description: '关闭后不读取私聊消息、图片、语音和通知，也不发送；排队消息实际投递前重新核对。'},
+      'worlds.qqbot.replyGroups': {type: 'boolean', title: '回复群聊', 'x-hot': true, description: '关闭后不读取群消息、图片、语音和通知，也不发送；排队消息实际投递前重新核对。'},
+      'worlds.qqbot.replyPrivates': {type: 'boolean', title: '回复私聊', 'x-hot': true, description: '关闭后不读取私聊消息、图片、语音和通知，也不发送；排队消息实际投递前重新核对。'},
       'worlds.qqbot.contentReviewUrl': {type: 'string', title: '内容审核地址', 'x-hot': true, description: '文字、语音和主动消息发送前审核；拒绝或不可用时发送文字 filtered。'},
       'worlds.qqbot.generationInstructionFile': {type:'string', title:'独立生成器的表达要求文件', 'x-hot':true,
         description:'可选的本地 JSON {active,language,instruction}，供主动冒泡与空间文案读取语言环境；配置后文件不可读时跳过本次生成。'},
@@ -592,17 +598,18 @@ export const QQ_CONFIG_GROUP: ConfigGroup = {
         description: '注入到提示词「现在时间」与事件时间戳的时区（按 UTC 偏移标注，默认中国 UTC+8）。改完即时生效，无需重启。',
       },
       'worlds.qqbot.wsUrl': { type: 'string', title: '正向 WS 地址', 'x-hot': false },
-      'worlds.qqbot.wsHost': { type: 'string', title: '反向监听地址', 'x-hot': false },
-      'worlds.qqbot.wsPort': { type: 'integer', title: '反向监听端口', minimum: 1, maximum: 65535, 'x-hot': false },
-      'worlds.qqbot.wsPath': { type: 'string', title: '反向监听路径', 'x-hot': false },
-      'worlds.qqbot.token': { type: 'string', title: 'OneBot Token', 'x-hot': false },
+      'worlds.qqbot.wsHost': { type: 'string', title: '反向监听地址', 'x-hot': false, description: '默认 127.0.0.1（只允许本机接入）。改成 0.0.0.0 会让同网段任何机器都能连上并伪造事件，必须同时设置 OneBot Token，否则会拒绝启动。' },
+      'worlds.qqbot.wsPort': { type: 'integer', title: '反向监听端口', minimum: 1, maximum: 65535, 'x-hot': false, description: '需与 NapCat「设置反向客户端」里填的端口一致。' },
+      'worlds.qqbot.wsPath': { type: 'string', title: '反向监听路径', 'x-hot': false, description: '需与 NapCat「设置反向客户端」里填的路径一致，默认 /onebot/v11/ws。' },
+      'worlds.qqbot.token': { type: 'string', title: 'OneBot Token', 'x-hot': false, description: '反向连接留空会自动生成一个随机 token 并保存到 dataDir/reverse-token.txt（启动日志与控制台「连接与监听」页会显示），请把它填进 NapCat「设置反向客户端」的 Token。仅正向连接时填 NapCat「设置正向服务器」那个 Token；留空表示不校验。' },
       'worlds.qqbot.groups': { type: 'string', title: '监听群', 'x-hot': true, description: '只读取名单内的群号，用空格或逗号分隔；留空不监听任何群。改完即时生效，不用重启。' },
+
       'worlds.qqbot.privates': { type: 'string', title: '监听私聊', 'x-hot': true, description: '监听的私聊对方 QQ 号，用空格或逗号分隔。改完即时生效，不用重启。' },
       'worlds.qqbot.deliverImageAttachments': { type: 'boolean', title: '图片作为模型附件', 'x-hot': true },
       'worlds.qqbot.emojiDir': { type: 'string', title: '表情包目录', 'x-hot': false, description: '本地表情包图片目录（相对扩展或绝对路径），供发送 [表情包:文件名] 标记。' },
       'worlds.qqbot.splitReplyBySentence': { type: 'boolean', title: '按句拆分发送', 'x-hot': true, description: '开启后回复按句标拆成多条消息（对齐 fat-fish）。' },
       'worlds.qqbot.sentencesPerMessage': { type: 'integer', title: '每条句数', minimum: 1, maximum: 10, 'x-hot': true },
-      'worlds.qqbot.maxPrivateMessagesPerReply': {type:'integer',title:'私聊每次回复最多条数',minimum:0,maximum:20,'x-hot':true,description:'同一模型回合向每个私聊最多发送的消息数，含文字、图片和语音；超出的分句尽量合并。0 表示不限。'},
+      'worlds.qqbot.maxPrivateMessagesPerReply': {type:'integer',title:'私聊每次回复最多条数',minimum:0,maximum:20,'x-hot':true,description:'同一条私聊来信对应的回复上限，文字、图片和语音共用；跨多次工具调用与模型回合累计，收到新消息才重置。超出的分句尽量合并，0 表示不限。'},
       'worlds.qqbot.sendIntervalMs': { type: 'integer', title: '发送间隔(ms)', minimum: 0, maximum: 5000, 'x-hot': true, description: '逐条发送之间的间隔，0 表示不限速。' },
       'worlds.qqbot.vision.enabled': { type: 'boolean', title: '开启辅助视觉', 'x-hot': false },
       'worlds.qqbot.vision.model': { type: 'string', title: 'VLM 模型', 'x-hot': false },
@@ -623,6 +630,8 @@ export const QQ_CONFIG_GROUP: ConfigGroup = {
         description: 'private=仅私聊；group=仅群；both=都主动。',
       },
       'worlds.qqbot.proactive.model': { type: 'string', title: '主动消息模型', 'x-hot': false, description: '生成主动闲聊用的 chat 模型（OpenAI 兼容端点）。' },
+      'worlds.qqbot.proactive.systemPrompt': { type: 'string', title: '主动聊天的公开人设与表达', 'x-hot': false, description: '独立生成器使用的公开性格与表达要求。不要填入私人档案或其他会话内容；修改后重启生效。' },
+      'worlds.qqbot.proactive.privateCooldownSec': { type: 'integer', title: '私聊主动消息间隔(秒)', minimum: 0, maximum: 86400, 'x-hot': false, description: '同一私聊两次主动消息的最小间隔；修改后重启生效。' },
       'worlds.qqbot.proactive.dailyQuota': { type: 'integer', title: '每日上限', minimum: 0, maximum: 200, 'x-hot': true, description: '每日主动消息条数上限（0=不限）。' },
       'worlds.qqbot.proactive.quietFrom': { type: 'integer', title: '静默开始(时)', minimum: 0, maximum: 23, 'x-hot': true, description: '按配置时区。静默期间停止主动冒泡和群聊发送，允许私聊回复；与结束小时相同则关闭。' },
       'worlds.qqbot.proactive.quietTo': { type: 'integer', title: '静默结束(时)', minimum: 0, maximum: 23, 'x-hot': true },
@@ -715,8 +724,8 @@ export const QQ_CALL_GROUP: ConfigGroup = {
     title: '语音通话（模拟）',
     description: '用 QQ 语音消息模拟"打电话"：触发词接听、即时听说、分句流式语音。注：OneBot/NapCat 无法真正接听系统级 QQ 电话，此为语音消息会话模拟。',
     properties: {
-    'worlds.qqbot.call.enabled': { type: 'boolean', title: '启用语音通话', 'x-hot': true, description: '开启后，用户发触发词即进入语音通话会话（机器人在线接听）。' },
-    'worlds.qqbot.call.triggerWords': { type: 'string', title: '来电触发词', 'x-hot': true, description: '逗号分隔。收到这些词视为"来电"，机器人接听。例如：打电话,语音通话,call me。' },
+    'worlds.qqbot.call.enabled': { type: 'boolean', title: '启用语音通话', 'x-hot': true, description: '模拟模式响应完整触发指令；系统模式只接听真实 QQ 来电。' },
+    'worlds.qqbot.call.triggerWords': { type: 'string', title: '来电触发词', 'x-hot': true, description: '仅模拟模式生效，逗号分隔，整条消息须与其中一项相同（忽略大小写和首尾空格）。例如：打电话,语音通话,call me。普通聊天提到这些词仍按聊天处理；受发送限制时也保留消息。' },
     'worlds.qqbot.call.hangupWords': { type: 'string', title: '挂断词', 'x-hot': true, description: '逗号分隔。通话中收到这些词即挂断。例如：挂电话,再见,拜拜。' },
     'worlds.qqbot.call.greeting': { type: 'string', title: '接听招呼语', 'x-hot': true, description: '接听后第一句语音。留空则由 AI 根据当前情境自动生成开场白（不写死）；填了就用固定文案。' },
     'worlds.qqbot.call.farewell': { type: 'string', title: '挂断告别语', 'x-hot': true, description: '挂断时最后一句语音。留空则由 AI 自动生成告别语；填了就用固定文案。' },
@@ -751,14 +760,15 @@ export const QQ_CALL_GROUP: ConfigGroup = {
   },
 };
 
-/** 语音识别（ASR）共享配置组：语音收发（收语音）与语音通话（听写）共用同一套识别引擎，只在此处配置一次。 */
+
+/** 语音识别（ASR）共享配置组：语音收发（收语音）用同一套识别引擎，只在此处配置一次。 */
 export const QQ_ASR_GROUP: ConfigGroup = {
   id: 'world:qqbot-asr',
   owner: 'world:qqbot',
   schema: {
     type: 'object',
     title: '语音识别（ASR 共享）',
-    description: '语音收发（收语音）与语音通话（听写）共用同一套识别引擎，只在此处配置一次。默认 local + funasr（SenseVoiceSmall，中文更准，自动从 ModelScope 下载）；可切 228MB 的 sherpa-onnx 版（int8 量化，更省内存更快，已接入）——先在控制台「语音模型」面板点「下载」拉取模型，再切引擎。改完需重启生效。',
+    description: '语音收发（收语音）用同一套识别引擎，只在此处配置一次。默认 local + funasr（SenseVoiceSmall，中文更准，自动从 ModelScope 下载）；可切 228MB 的 sherpa-onnx 版（int8 量化，更省内存更快，已接入）——先在控制台「语音模型」面板点「下载」拉取模型，再切引擎。改完需重启生效。',
     properties: {
     'worlds.qqbot.asr.mode': {
       type: 'string', title: 'ASR 模式', enum: ['off', 'cloud', 'local'], 'x-hot': true,
@@ -833,10 +843,17 @@ export const QQ_VOXCPM_SIDECAR_GROUP: ConfigGroup = {
  * 原地补全缺省值并保持对象身份：让 World 持有的 this.config 就是 ctx.cfg 的同一引用，
  * 这样控制台的 x-hot 配置改动（groups / privates / 发送节奏等）能即时对 World 生效，无需重启。
  */
-/** 把“空格/逗号分隔字符串”或“数字数组”统一成数字数组（过滤非有限值）。控制台以字符串编辑，运行时以数组使用。 */
+/**
+ * 把“空格/逗号分隔字符串”或“数字数组”统一成数字数组。控制台以字符串编辑，运行时以数组使用。
+ *
+ * **只收正整数**：群号与 QQ 号恒为正，`Number("")` 却得到 0（`isFinite(0)` 为真），所以
+ * 「留空 = 不监听」会被解析成「监听 0 号」——面板清空后读回来永远是个 0，表现为“保存不了”。
+ * （同文件的 `parseNumberSeq` 靠 `filter(Boolean)` 先滤空串，等效；这里额外拒掉 0/负数/小数。）
+ */
 export function toIds(raw: unknown): number[] {
-  if (Array.isArray(raw)) return raw.map(Number).filter((n) => Number.isFinite(n));
-  if (typeof raw === 'string') return raw.split(/[\s,]+/).map(Number).filter((n) => Number.isFinite(n));
+  const ok = (n: number): boolean => Number.isInteger(n) && n > 0;
+  if (Array.isArray(raw)) return raw.map(Number).filter(ok);
+  if (typeof raw === 'string') return raw.split(/[\s,]+/).map(Number).filter(ok);
   return [];
 }
 
@@ -902,9 +919,9 @@ export function normalizeConfig(raw: QQConfigSection): QQWorldConfig {
     if (!Number.isInteger(p[key]) || Number(p[key]) < 0 || Number(p[key]) > 23) p[key] = QQ_DEFAULTS.proactive[key];
   }
   // qzone 子对象原地合并
-  c.qzone = c.qzone && typeof c.qzone === 'object' ? c.qzone : {};
-  Object.assign(c.qzone, { ...QQ_DEFAULTS.qzone, ...(c.qzone as Record<string, unknown>) });
-  const q = c.qzone as Record<string, unknown>;
+  c.qzone = c.qzone && typeof c.qzone === 'object' ? c.qzone : {...QQ_DEFAULTS.qzone};
+  Object.assign(c.qzone, { ...QQ_DEFAULTS.qzone, ...(c.qzone as unknown as Record<string, unknown>) });
+  const q = c.qzone as unknown as Record<string, unknown>;
   if (typeof q.enabled !== 'boolean') q.enabled = false;
   if (typeof q.systemPrompt !== 'string' || !q.systemPrompt) q.systemPrompt = QQ_DEFAULTS.qzone.systemPrompt;
   if (typeof q.endpoint !== 'string' || !q.endpoint) q.endpoint = QQ_DEFAULTS.qzone.endpoint;
@@ -946,9 +963,9 @@ export function normalizeConfig(raw: QQConfigSection): QQWorldConfig {
   if (typeof em.decayHours !== 'number' || (em.decayHours as number) <= 0) em.decayHours = QQ_DEFAULTS.emotion.decayHours;
   if (typeof em.labelMinutes !== 'number' || (em.labelMinutes as number) < 0) em.labelMinutes = QQ_DEFAULTS.emotion.labelMinutes;
   // routine 子对象原地合并
-  c.routine = c.routine && typeof c.routine === 'object' ? c.routine : {};
+  c.routine = c.routine && typeof c.routine === 'object' ? c.routine : {...QQ_DEFAULTS.routine};
   Object.assign(c.routine, { ...QQ_DEFAULTS.routine, ...(c.routine as object) });
-  const rt = c.routine as Record<string, unknown>;
+  const rt = c.routine as unknown as Record<string, unknown>;
   if (typeof rt.enabled !== 'boolean') rt.enabled = false;
   if (typeof rt.sleepStart !== 'string' || !/^\d{1,2}:\d{2}$/.test(rt.sleepStart as string)) rt.sleepStart = QQ_DEFAULTS.routine.sleepStart;
   if (typeof rt.sleepEnd !== 'string' || !/^\d{1,2}:\d{2}$/.test(rt.sleepEnd as string)) rt.sleepEnd = QQ_DEFAULTS.routine.sleepEnd;
@@ -958,17 +975,17 @@ export function normalizeConfig(raw: QQConfigSection): QQWorldConfig {
   if (typeof rt.greetWake !== 'string') rt.greetWake = QQ_DEFAULTS.routine.greetWake;
   if (typeof rt.greetLazy !== 'string') rt.greetLazy = QQ_DEFAULTS.routine.greetLazy;
   // reminder 子对象原地合并
-  c.reminder = c.reminder && typeof c.reminder === 'object' ? c.reminder : {};
+  c.reminder = c.reminder && typeof c.reminder === 'object' ? c.reminder : {...QQ_DEFAULTS.reminder};
   Object.assign(c.reminder, { ...QQ_DEFAULTS.reminder, ...(c.reminder as object) });
   const rm = c.reminder as Record<string, unknown>;
   if (typeof rm.enabled !== 'boolean') rm.enabled = true;
   // affinity 子对象原地合并
-  c.affinity = c.affinity && typeof c.affinity === 'object' ? c.affinity : {};
+  c.affinity = c.affinity && typeof c.affinity === 'object' ? c.affinity : {...QQ_DEFAULTS.affinity};
   Object.assign(c.affinity, { ...QQ_DEFAULTS.affinity, ...(c.affinity as object) });
   const af = c.affinity as Record<string, unknown>;
   if (typeof af.enabled !== 'boolean') af.enabled = true;
   // voice 子对象原地合并
-  c.voice = c.voice && typeof c.voice === 'object' ? c.voice : {};
+  c.voice = c.voice && typeof c.voice === 'object' ? c.voice : {...QQ_DEFAULTS.voice};
   Object.assign(c.voice, { ...QQ_DEFAULTS.voice, ...(c.voice as object) });
   const vc = c.voice as Record<string, unknown>;
   if (typeof vc.enabled !== 'boolean') vc.enabled = false;
@@ -992,9 +1009,9 @@ export function normalizeConfig(raw: QQConfigSection): QQWorldConfig {
   if (typeof vc.voxcpmTimesteps !== 'number' || !(vc.voxcpmTimesteps > 0)) vc.voxcpmTimesteps = QQ_DEFAULTS.voice.voxcpmTimesteps;
   if (typeof vc.voxcpmSeed !== 'number' || vc.voxcpmSeed < 0) vc.voxcpmSeed = QQ_DEFAULTS.voice.voxcpmSeed;
   // asr 子对象原地合并（语音收发与语音通话共用的识别配置）
-  c.asr = c.asr && typeof c.asr === 'object' ? c.asr : {};
+  c.asr = c.asr && typeof c.asr === 'object' ? c.asr : {...QQ_DEFAULTS.asr};
   Object.assign(c.asr, { ...QQ_DEFAULTS.asr, ...(c.asr as object) });
-  const ac = c.asr as Record<string, unknown>;
+  const ac = c.asr as unknown as Record<string, unknown>;
   if (!['off', 'cloud', 'local'].includes(ac.mode as string)) ac.mode = 'local';
   if (typeof ac.localEngine !== 'string' || !ac.localEngine) ac.localEngine = 'funasr';
   if (typeof ac.localModelPath !== 'string') ac.localModelPath = '';

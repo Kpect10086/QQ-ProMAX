@@ -3,5 +3,9 @@ fixture-data/
 .env
 .env.*
 .npmrc
-*.log
 *.tgz
+*.log
+*.db
+*.db-wal
+*.db-shm
+coverage/

@@ -18,6 +18,13 @@ type FieldDef = {
 type SchemaResp = { groupId: string; title?: string; properties: FieldDef[]; values: Record<string, unknown> };
 type ModuleSpec = { id: string; title: string; desc: string; group: string; prefix: string; topOnly: boolean; status?: string; extra?: string };
 
+/**
+ * 「使用教程」链接指向的地址。面板资源路由只放行 manifest 声明的脚本/样式，
+ * 教程 HTML 没法从扩展目录伺服，所以这里给一个外部地址；
+ * 想换成自己那份，把这个常量改掉重新构建即可。
+ */
+const TUTORIAL_URL = 'https://github.com/hth768/cortico-world-qq-final/blob/main/docs/guide.md';
+
 // 与 world.ts modulePanels 对应
 const MODULES: ModuleSpec[] = [
   {id: 'quiet', title: '静默白名单', desc: '作息睡眠和午休期间停止主动发送，只回复独立的群聊或私聊名单。', group: 'world:qqbot-quiet', prefix: '', topOnly: false, status: 'getQuietState'},
@@ -63,7 +70,7 @@ function loadSchema(ctx: WebUiPanelContext, m: ModuleSpec): Promise<SchemaResp |
   return ctx.invoke<SchemaResp>('config', [m.group, m.prefix, m.topOnly]).catch(() => null);
 }
 
-function renderField(ctx: WebUiPanelContext, def: FieldDef, value: unknown, commit: (v: unknown) => void): HTMLElement {
+function renderField(ctx: WebUiPanelContext, def: FieldDef, value: unknown, commit: (v: import("cortico/core/config-schema.ts").ConfigValue) => void): HTMLElement {
   const ui = ctx.ui;
   const wrap = document.createElement('div');
   wrap.style.margin = '10px 0';
@@ -84,17 +91,34 @@ function renderField(ctx: WebUiPanelContext, def: FieldDef, value: unknown, comm
       onChange: (v: string) => commit(v),
     });
   } else if (def.type === 'integer' || def.type === 'number') {
+    const num = (v: string): number => (def.type === 'integer' ? parseInt(v || '0', 10) : parseFloat(v || '0'));
     control = ui.input({
       value: value == null ? '' : String(value),
       type: 'number',
-      onChange: (v: string) => commit(def.type === 'integer' ? parseInt(v || '0', 10) : parseFloat(v || '0')),
+      onChange: (v: string) => commit(num(v)),
+      onCommit: (v: string) => commit(num(v)),
     });
   } else if (isLongText(def.key, def)) {
-    control = ui.textarea({ value: value == null ? '' : String(value), rows: 4, onChange: (v: string) => commit(v) });
+    // textarea 的裸 Enter 是换行，框架只在 Ctrl/⌘+Enter 时才触发 onCommit。
+    control = ui.textarea({
+      value: value == null ? '' : String(value),
+      rows: 4,
+      onChange: (v: string) => commit(v),
+      onCommit: (v: string) => commit(v),
+    });
   } else if (/secret|key/i.test(def.key) || /key|密钥|token/i.test(def.title)) {
-    control = ui.input({ value: value == null ? '' : String(value), type: 'password', onChange: (v: string) => commit(v) });
+    control = ui.input({
+      value: value == null ? '' : String(value),
+      type: 'password',
+      onChange: (v: string) => commit(v),
+      onCommit: (v: string) => commit(v),
+    });
   } else {
-    control = ui.input({ value: value == null ? '' : String(value), onChange: (v: string) => commit(v) });
+    control = ui.input({
+      value: value == null ? '' : String(value),
+      onChange: (v: string) => commit(v),
+      onCommit: (v: string) => commit(v),
+    });
   }
   wrap.appendChild(control);
 
@@ -177,6 +201,70 @@ function makePanel(m: ModuleSpec): WebUiPanel {
         );
       }
 
+      // 连接与监听：顶部放「使用教程」链接 + 「重启连接」按钮。
+      // 连接类配置改了之后点一下重启即可生效，不必整进程重启。
+      if (m.id === 'general') {
+        const bar = ui.rowbar();
+
+        const link = document.createElement('a');
+        link.href = TUTORIAL_URL;
+        link.target = '_blank';
+        link.rel = 'noreferrer noopener';
+        link.textContent = '📘 使用教程';
+        link.style.fontSize = '13px';
+        link.style.textDecoration = 'none';
+        link.style.color = 'var(--accent, #16a34a)';
+        link.title = '新窗口打开接入教程';
+        bar.appendChild(link);
+
+        const restart = ui.button('重启连接', {
+          size: 'sm',
+          onClick: () => {
+            restart.disabled = true;
+            restart.textContent = '重启中…';
+            void ctx.invoke('restartConnection', []).then(
+              (r) => {
+                const res = r as { ok?: boolean; message?: string; target?: string } | undefined;
+                const msg = res?.message ?? (res?.ok ? '已重启连接。' : '重启失败。');
+                toast(msg);
+                if (res?.target) restart.textContent = `已重启 · ${res.target}`;
+              },
+              (e: unknown) => { toast('重启失败：' + (e instanceof Error ? e.message : String(e))); },
+            ).finally(() => {
+              restart.disabled = false;
+              setTimeout(() => { restart.textContent = '重启连接'; }, 4000);
+            });
+          },
+        });
+        bar.appendChild(restart);
+
+        // 反向连接首次启动会自动生成 token（并持久化到 dataDir/reverse-token.txt），
+        // 用户必须知道它才能填进 NapCat「设置反向客户端」。这里按需取一次并显示。
+        if (m.id === 'general') {
+          void ctx.invoke('getReverseToken', []).then((r) => {
+            const t = typeof r === 'string' ? r : '';
+            if (!t) return;
+            const box = document.createElement('div');
+            box.className = 'msgline';
+            box.style.cssText = 'margin-top:8px;font-size:12px';
+            box.textContent =
+              `反向连接 Token（自动生成，已保存到 dataDir/reverse-token.txt）：${t}` +
+              ' — 请在 NapCat「设置反向客户端」的 Token 里填同一串，否则连不上。';
+            bar.parentElement?.insertBefore(box, bar.nextSibling);
+          }, () => { /* 取不到就不提示，不影响其它功能 */ });
+        }
+        sheet.body.appendChild(bar);
+
+        const tip = document.createElement('div');
+        tip.style.fontSize = '12px';
+        tip.style.opacity = '0.7';
+        tip.style.margin = '0 0 10px';
+        tip.innerHTML =
+          '默认是<b>反向连接</b>：桌宠开监听、NapCat 主动连入，此时 <b>OneBot Token 留空</b>即可。' +
+          '只有改成「正向连接」时才需要填 Token（填 NapCat 里<b>正向 WS 服务器</b>那个）。';
+        sheet.body.appendChild(tip);
+      }
+
       // ASR 下载按钮（额外）
       if (m.extra === 'asr') {
         const dl = ui.button('下载/校验 ASR 模型', {
@@ -229,29 +317,124 @@ function sectionEl(title: string, items: string[]): HTMLElement {
   return wrap;
 }
 
-// 只读「监听名单」：服务端 getRoster 返回 groups/privates/convs（本扩展暂不支持网页编辑，改动走 config.json）。
+// 「监听名单」：服务端 getRoster 返回 groups/privates/convs。群号/私聊 QQ 号可直接在页面编辑。
+// 写入方式与「配置」面板的表单字段完全一致：**失焦即存、Enter（textarea 为 Ctrl/⌘+Enter）提交**，
+// 每次只提交自己那一个字段；保存成功后**不重建表单**，以免把用户刚输入的格式改写成
+// `toIds().join(' ')`（如 `111,222` → `111 222`）而让人误以为没保存生效。
+type RosterData = { selfId?: number | null; mode?: string; groups?: number[]; privates?: number[]; convs?: Array<{ address: string; label?: string; kind?: string; active?: boolean; members?: number }> };
+
+/** 监听名单两项对应的配置键（与 config.ts 里 world:qqbot 组的 property key 一致）。 */
+const ROSTER_KEYS = {
+  groups: 'worlds.qqbot.groups',
+  privates: 'worlds.qqbot.privates',
+} as const;
+const ROSTER_LABELS = { groups: '监听群', privates: '监听私聊' } as const;
+
+
 const rosterPanel: WebUiPanel = {
   mount(ctx: WebUiPanelContext) {
     const ui = ctx.ui;
-    const sheet = ui.sheet({ title: '监听名单', desc: '当前监听的群与私聊及未读情况。' });
-    sheet.body.textContent = '加载监听名单…';
+    const sheet = ui.sheet({ title: '监听名单', desc: '当前监听的群与私聊；下方可直接编辑，保存即时生效（无需重启）。' });
+    const status = ui.msgline('加载监听名单…');
+    sheet.body.appendChild(status);
+    const formHost = document.createElement('div');
+    sheet.body.appendChild(formHost);
     ctx.root.appendChild(sheet.el);
-    void ctx.invoke('getRoster').then(
-      (r) => {
-        const data = r as { selfId?: number | null; mode?: string; groups?: number[]; privates?: number[]; convs?: Array<{ address: string; label?: string; kind?: string; active?: boolean; members?: number }> };
-        sheet.body.replaceChildren();
-        const info = document.createElement('div');
-        info.style.fontSize = '12px';
-        info.style.opacity = '0.7';
-        info.style.marginBottom = '8px';
-        info.textContent = `selfId: ${data.selfId ?? '—'}  mode: ${data.mode ?? '—'}  群数: ${(data.groups || []).length}  私聊数: ${(data.privates || []).length}`;
-        sheet.body.appendChild(info);
-        sheet.body.appendChild(sectionEl('监听群', (data.groups || []).map((g) => String(g))));
-        sheet.body.appendChild(sectionEl('监听私聊', (data.privates || []).map((p) => String(p))));
-        sheet.body.appendChild(sectionEl('活跃会话', (data.convs || []).map((c) => `${c.label || c.address} [${c.kind || '?'}]${c.active ? ' •在线' : ''} 成员:${c.members ?? 0}`)));
-      },
-      (e: unknown) => { sheet.body.textContent = '监听名单读取失败：' + (e instanceof Error ? e.message : String(e)); },
-    );
+
+    const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
+    const build = (data: RosterData) => {
+      formHost.replaceChildren();
+      const groupsVal = (data.groups || []).join(' ');
+      const privatesVal = (data.privates || []).join(' ');
+
+      const info = document.createElement('div');
+      info.style.fontSize = '12px';
+      info.style.opacity = '0.7';
+      info.style.marginBottom = '8px';
+      info.textContent = `selfId: ${data.selfId ?? '—'}  mode: ${data.mode ?? '—'}  群数: ${(data.groups || []).length}  私聊数: ${(data.privates || []).length}`;
+
+      /** 保存单个字段：与配置栏 renderField 的 commit 走同一条路（POST /api/config）。 */
+      const saveField = async (which: keyof typeof ROSTER_KEYS, raw: string) => {
+        status.textContent = `正在保存${ROSTER_LABELS[which]}…`;
+        try {
+          await ctx.setConfig('world:qqbot', { [ROSTER_KEYS[which]]: raw.trim() });
+          status.textContent = `${ROSTER_LABELS[which]}已保存 ✓ 即时生效（无需重启）`;
+        } catch (e) {
+          status.textContent = `${ROSTER_LABELS[which]}保存失败：${errText(e)}`;
+          status.classList.add('bad');
+          return;
+        }
+        status.classList.remove('bad');
+        // 只刷新顶部计数，不重建输入框（保留用户输入的原始格式与光标位置）。
+        try {
+          const r = (await ctx.invoke('getRoster')) as RosterData;
+          info.textContent = `selfId: ${r.selfId ?? '—'}  mode: ${r.mode ?? '—'}  群数: ${(r.groups || []).length}  私聊数: ${(r.privates || []).length}`;
+        } catch { /* 计数刷新失败不影响已保存的事实 */ }
+      };
+
+      const commitGroups = (v: string) => { void saveField('groups', v); };
+      const commitPrivates = (v: string) => { void saveField('privates', v); };
+
+      const groupsInput = ui.textarea({
+        value: groupsVal,
+        rows: 3,
+        placeholder: '监听的群号，用空格或逗号分隔；留空=全部群',
+        onChange: commitGroups,
+        onCommit: commitGroups,
+      });
+      const privatesInput = ui.textarea({
+        value: privatesVal,
+        rows: 3,
+        placeholder: '监听的私聊 QQ 号，用空格或逗号分隔；留空=不监听私聊',
+        onChange: commitPrivates,
+        onCommit: commitPrivates,
+      });
+
+      const groupWrap = document.createElement('div');
+      groupWrap.style.margin = '10px 0';
+      const gl = document.createElement('div');
+      gl.style.fontWeight = '600';
+      gl.style.marginBottom = '3px';
+      gl.textContent = '监听群（空格/逗号分隔）';
+      groupWrap.append(gl, groupsInput);
+
+      const privWrap = document.createElement('div');
+      privWrap.style.margin = '10px 0';
+      const pl = document.createElement('div');
+      pl.style.fontWeight = '600';
+      pl.style.marginBottom = '3px';
+      pl.textContent = '监听私聊（空格/逗号分隔）';
+      privWrap.append(pl, privatesInput);
+
+      // 两个框各自失焦/Enter 即存；这个按钮只是「一次提交两项」的兜底，不是唯一入口。
+      const saveAll = ui.button('保存两个名单', {
+        onClick: () => {
+          status.textContent = '正在保存…';
+          void ctx.setConfig('world:qqbot', {
+            [ROSTER_KEYS.groups]: groupsInput.value.trim(),
+            [ROSTER_KEYS.privates]: privatesInput.value.trim(),
+          }).then(
+            () => { status.textContent = '监听群与监听私聊已保存 ✓ 即时生效'; status.classList.remove('bad'); },
+            (e: unknown) => { status.textContent = '保存失败：' + errText(e); status.classList.add('bad'); },
+          );
+        },
+      });
+
+      formHost.append(info, groupWrap, privWrap, saveAll);
+      formHost.appendChild(sectionEl('活跃会话', (data.convs || []).map((c) => `${c.label || c.address} [${c.kind || '?'}]${c.active ? ' •在线' : ''} 成员:${c.members ?? 0}`)));
+    };
+
+    const load = () => {
+      status.textContent = '加载监听名单…';
+      status.classList.remove('bad');
+      return ctx.invoke('getRoster').then(
+        (r) => { status.textContent = '编辑后失焦或按 Ctrl/⌘+Enter 即自动保存。'; build(r as RosterData); },
+        (e: unknown) => { status.textContent = '监听名单读取失败：' + errText(e); status.classList.add('bad'); },
+      );
+    };
+
+    void load();
   },
 };
 
@@ -307,6 +490,7 @@ const panels: Record<string, WebUiPanel> = {};
 for (const m of MODULES) panels[m.id] = makePanel(m);
 panels['roster'] = rosterPanel;
 panels['events'] = eventsPanel;
+
 
 
 const bundle: WebUiClientBundle = { panels };

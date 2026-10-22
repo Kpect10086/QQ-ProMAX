@@ -1,8 +1,13 @@
+import type {Language} from 'cortico/core/language.ts';
+import type {ToolCallContext} from 'cortico/core/types.ts';
+type WorldHost = FrameworkWorldHost & {isPaused?():boolean};
+const toolError = (error: string) => ({failed:true as const,text:error,error});
 import { spawn, type ChildProcess } from 'node:child_process';
-import {createHash} from 'node:crypto';
-import { existsSync, readFileSync, writeFileSync, readdirSync, openSync, mkdirSync, renameSync } from 'node:fs';
+import {createHash, randomBytes} from 'node:crypto';
+import { existsSync, readFileSync, writeFileSync, readdirSync, openSync, mkdirSync, renameSync, statSync } from 'node:fs';
 import { createConnection } from 'node:net';
-import { type BlobInput, type EventEnvelope, type Language, type Logger, type PromptDocDecl, type ToolDef, type World, type WorldWebUiDecl, type WorldHost, type WorldLamp, type WorldPanelDecl, type WorldStreamSocket } from 'cortico/core/types.ts';
+import { type BlobInput, type EventEnvelope, type Logger, type PromptDocDecl, type ToolDef, type ToolSpec, type World, type WorldWebUiDecl, type WorldHost as FrameworkWorldHost, type WorldLamp, type WorldPanelDecl, type WorldStreamSocket } from 'cortico/core/types.ts';
+
 import { shortTime } from 'cortico/core/util.ts';
 import { reviewContent, reviewMemory } from './content-review.ts';
 import {QQStreamGate} from './stream-gate.ts';
@@ -12,11 +17,13 @@ import { OneBotDriver } from './driver.ts';
 import { QZonePoster, type QZoneConfig } from './qzone.ts';
 import { QQ_CONFIG_GROUP, QQ_VOICE_GROUP, QQ_CALL_GROUP, QQ_ASR_GROUP, QQ_VOXCPM_SIDECAR_GROUP, QQ_DEFAULTS, normalizeConfig, toIds, type QQConfigSection, type QQWorldConfig } from './config.ts';
 import { transcribeRecord, decodeRecord, synthesizeVoice, judgeVoiceWish, checkVoiceDeps, voiceReady, splitIntoSentences, type RuntimeVoiceCfg } from './voice.ts';
+
+// 「听」能力模块化：切句/并句/识别契约与 cortico-world-desktop-pet 完全对齐，未来合并桌宠时共用一份。
 import { AudioListener } from './asr/listener.ts';
 import { HttpRecognizer } from './asr/recognizer.ts';
 import { isAbsolute, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildOutgoing, eventClock, eventTs, renderIncoming, renderSegmentsPlain, splitReplyIntoMessages } from './normalize.ts';
+import { buildOutgoing, resolveEmojiFile, eventClock, eventTs, renderIncoming, renderSegmentsPlain, splitReplyIntoMessages } from './normalize.ts';
 
 const ENV_PROMPT_FILE = fileURLToPath(new URL('../ENV_PROMPT.md', import.meta.url));
 
@@ -31,12 +38,14 @@ function matchAnyWord(haystack: string, commaSep: string): boolean {
 }
 import { type Conv, type OneBotMessage, type OneBotSegment, type QQIdentity, type QQSenderBrief } from './types.ts';
 import { Vision } from './vision.ts';
+import { previewVideo } from './video.ts';
 import { StickerStore } from './sticker.ts';
 import { ReminderStore, parseWhen, formatWhen } from './reminder.ts';
 import { AffinityStore, affinityLabel } from './affinity.ts';
 import { ProactiveSpeaker, type ProactiveTarget, type ChatMsg, routineSegment } from './proactive.ts';
 import { EmotionEngine } from './emotion.ts';
 import { makeHistoryTools } from './history-tools.ts';
+import { compactQQTools } from './compact-tools.ts';
 import { Notebook } from './notebook.ts';
 import { festivalText } from './festival.ts';
 
@@ -58,6 +67,8 @@ interface PendingSend {
   address: string;
   label: string;
   text: string;
+  images?: string[];
+  voice?: boolean;
   createdAt: number;
   /** 绑定到本草稿的引用回复消息编号（跨会话校验后写入）。 */
   replyMessageId?: number;
@@ -97,7 +108,7 @@ export class QQWorld implements World {
   private inCall = new Set<string>();
   /** 正在"接通中"的会话：已收到来电、但本地语音模型尚未就绪，正在等待其初始化完成后接听 */
   private pendingCall = new Set<string>();
-  /** 系统级真接电话(system 模式)：每会话的「听」管线（切句、识别和并句，见 src/asr/listener.ts） */
+  /** 系统级真接电话(system 模式)：每会话的「听」管线（切句+识别+并句，见 src/asr/listener.ts，与桌宠同契约，未来合并共用） */
   private systemListeners = new Map<string, AudioListener>();
   private nativeCallTimer: ReturnType<typeof setInterval> | null = null;
   private nativeCallPolling = false;
@@ -135,8 +146,9 @@ export class QQWorld implements World {
   private deliveredSendPolicy = '';
   /** sendTo 因限速/防死循环而拦截时返回的字符串前缀，便于 qq_send 工具区分“已发送”与“被拦截”。 */
   private static readonly SEND_BLOCKED = '[send blocked] ';
-  /** sendTo 因 NapCat 断连/图片获取失败等导致部分或全部段发送失败时返回的字符串前缀。 */
+  /** sendTo 没有任何一段确认发送成功时返回的字符串前缀。 */
   private static readonly SEND_FAILED = '[send failed] ';
+  private static readonly SEND_PARTIAL = '[send partial] ';
   /** 群聊发言频率限制：group:<id> -> 已发出消息的时间戳数组（用于滑动窗口计数）。 */
   private groupSpeakStamps = new Map<string, number[]>();
   /** 防死循环：会话地址 -> 自上次对方发言以来的 bot 连续发送条数。 */
@@ -158,9 +170,12 @@ export class QQWorld implements World {
    * 我们在回合收束时把模型生成的文本自动发往来源会话，避免漏发。
    */
   private readonly _pendingReplyConvs = new Set<string>();
+  private readonly pendingFilteredReplies = new Set<string>();
+  private readonly filteredReplyAttempts = new Set<string>();
   private _tapBuf = '';
   private readonly _sentThisTurn = new Set<string>();
   private privateReplyCounts = new Map<string, number>();
+  private privateReplyBudgets = new Map<string, {cursor: number; counts: Map<string, number>}>();
   /** 群成员昵称→QQ 缓存（懒加载，供按昵称 @人/戳人）。groupId -> (小写名->qq)。 */
   private readonly memberIndex = new Map<number, Map<string, number>>();
   private stickerDirAbs = '';
@@ -175,7 +190,8 @@ export class QQWorld implements World {
   /** key=QQ 号，value=上次注入上下文时记录的好感度；仅在数值变化/首次时重新注入，避免历史被刷屏。 */
   private affinityInjected = new Map<string, number>();
   // 发送去重：记录同会话最近一次实际发出的归一化文本，6s 内完全相同则跳过（防“一句话回复两遍”）。
-  private dedupSends = new Map<string, { norm: string; ts: number }>();
+  private dedupSends = new Map<string, { norm: string; ts: number; replyCursor?: number }>();
+  private recentSends: Array<{conv:string;at:string;text:string;messageIds:string[]}> = [];
   /** 状态持久化目录（来自 ctx.dataDir），用于跨重启重建 knownMessages（防串台索引）。 */
   private dataDir = '';
   private stateFile = '';
@@ -211,29 +227,58 @@ export class QQWorld implements World {
   }
 
   // ---- 生命周期 ----
-  async start(host: WorldHost): Promise<void> {
-    this.host = this.wrapHost(host);
-    this.connectedAtSec = Math.floor(Date.now() / 1000);
-    this.startupHistoryCount = 0;
-    this.historyOnlyConvs.clear();
-    this.sendPolicyQueued = false;
-    this.deliveredSendPolicy = '';
-    this.log = this.host.log.child('qq');
-    this.publishCallAudioState();
-    if (this.dataDir) {
-      this.streamGate = new QQStreamGate(() => this.config.directorStatusFile,
-        join(this.dataDir, 'qq-live-deferred.json'), () => this.host?.isPaused?.() ?? true,
-        async ev => {
-          if (this.streamGate?.blocked() || this.host?.isPaused?.()) throw Error('QQ delivery deferred');
-          await this.handleEvent(ev, true);
-        }, error => this.log.warn('直播暂存 QQ 消息仍待处理', {error: String(error)}));
-      if (this.streamGate.pending) this.log.info('QQ暂存队列已恢复，按当前开关和名单释放', {pending:this.streamGate.pending});
-      this.streamGate.start();
+
+  /**
+   * 反向监听必须带鉴权：连接进来的那一端能读到 bot 要发的全部消息、也能伪造入站事件
+   * （`get_group_member_info` 之类的管理接口就走这条连接）。若配置里 token 为空，
+   * 这里生成一个随机 token 并持久化到 dataDir，保证**任何情况下都不会退化成无鉴权监听**，
+   * 同时跨重启稳定，用户只需把它填进 NapCat 一次。
+   *
+   * 绑回环（127.0.0.1）时这仍是有意义的第二道锁：同机其它进程/恶意网页脚本都连不上。
+   */
+  private ensureReverseToken(): void {
+    if (this.config.mode !== 'reverse') return;
+    if (this.config.token) return;
+    const file = join(this.dataDir, 'reverse-token.txt');
+    let token = '';
+    try {
+      token = readFileSync(file, 'utf8').trim();
+    } catch {
+      /* 首次运行，下面生成 */
     }
-    this.vision = new Vision(this.config.vision, this.log, this.dataDir);
-    this.stickers = new StickerStore(this.stickerDirAbs || this.emojiDirAbs || join(this.packageDir, 'emoji'), this.config.vision, this.log, this.dataDir, (name) => this.resolveSecret(name));
-    this.syncConfigRoster();
-    this.driver = new OneBotDriver({
+    if (!/^[0-9a-f]{32,}$/i.test(token)) {
+      token = randomBytes(24).toString('hex');
+      try {
+        writeFileSync(file, token, { encoding: 'utf8', mode: 0o600 });
+      } catch (err) {
+        this.log?.warn?.('无法持久化反向连接 token，重启后会变化', { err: String(err) });
+      }
+    }
+    this.config.token = token;
+    // 注意：world 实例拿不到框架的配置写入 API（`World` 契约里没有持久化方法，
+    // 框架的 setConfigPath 是 bot.ts 的内部函数）。所以 token 只持久化到上面的
+    // reverse-token.txt；config.json 里的 token 字段保持用户自己填的值（默认为空）。
+    // 每次启动都会从这个文件读回同一串，因此跨重启稳定。
+    this.log?.warn?.(
+      `反向连接未配置 token，已自动生成：${token} —— 请在 NapCat「设置反向客户端」的 Token 里填同一串，否则连不上`,
+    );
+  }
+
+  /** 供控制台面板展示当前生效的反向 token（用户要拿它去配 NapCat）。 */
+  get reverseTokenForPanel(): string {
+    return this.config.mode === 'reverse' ? this.config.token : '';
+  }
+
+  /**
+   * 按**当前**配置新建 OneBot driver。连接类配置（模式/地址/端口/路径/Token）改了之后，
+   * 靠 {@link restartConnection} 重建 driver 即可生效，不必整进程重启。
+   * 注意 config 是 ctx.cfg 的同一引用（normalizeConfig 原地补全），这里读到的就是最新值。
+   */
+  private createDriver(): OneBotDriver {
+    //建 driver 前再确认一次（restartConnection 也走这里，配置刚被改过时兜底）。
+    this.ensureReverseToken();
+    return new OneBotDriver({
+
       mode: this.config.mode,
       wsUrl: this.config.wsUrl,
       wsHost: this.config.wsHost,
@@ -253,6 +298,80 @@ export class QQWorld implements World {
         }
       },
     });
+  }
+
+  /**
+   * 用当前配置重建 OneBot 连接（控制台「重启连接」按钮）。
+   * 只换 driver，会话状态/存储/定时器都不动——比整进程重启轻得多，改完连接参数点一下即可。
+   */
+  async restartConnection(): Promise<{ ok: boolean; mode: string; target: string; message: string }> {
+    const prev = this.driver;
+    this.driver = null;
+    this.connected = false;
+    if (prev) {
+      try {
+        await prev.stop();
+      } catch (e) {
+        this.log.warn('重启连接时关闭旧连接失败', { err: String(e) });
+      }
+    }
+    const driver = this.createDriver();
+    this.driver = driver;
+    // syncConfigRoster 让监听名单的增删立即反映到会话集合（不需要重启也能加群/加私聊）。
+    this.syncConfigRoster();
+    try {
+      await driver.start();
+    } catch (e) {
+      this.log.warn('重启连接失败', { err: String(e) });
+      return {
+        ok: false,
+        mode: this.config.mode,
+        target: this.describeWsTarget(),
+        message: `重启失败：${e instanceof Error ? e.message : String(e)}`,
+      };
+    }
+    return {
+      ok: true,
+      mode: this.config.mode,
+      target: this.describeWsTarget(),
+      message: this.config.mode === 'reverse'
+        ? '已按当前配置重启反向监听，等待 NapCat 连入。'
+        : '已按当前配置重启正向连接。',
+    };
+  }
+
+  /** 当前连接目标的可读描述，用于面板回显（不暴露 Token）。 */
+  private describeWsTarget(): string {
+    const c = this.config;
+    return c.mode === 'reverse'
+      ? `reverse ${c.wsHost}:${c.wsPort}${c.wsPath}`
+      : `forward ${c.wsUrl}`;
+  }
+
+  async start(host: WorldHost): Promise<void> {
+    this.host = this.wrapHost(host);
+    this.connectedAtSec = Math.floor(Date.now() / 1000);
+    this.startupHistoryCount = 0;
+    this.historyOnlyConvs.clear();
+    this.sendPolicyQueued = false;
+    this.deliveredSendPolicy = '';
+    this.log = this.host.log.child('qq');
+    this.ensureReverseToken();
+    this.publishCallAudioState();
+    if (this.dataDir) {
+      this.streamGate = new QQStreamGate(() => this.config.directorStatusFile,
+        join(this.dataDir, 'qq-live-deferred.json'), () => this.host?.isPaused?.() ?? true,
+        async ev => {
+          if (this.streamGate?.blocked() || this.host?.isPaused?.()) throw Error('QQ delivery deferred');
+          await this.handleEvent(ev, true);
+        }, error => this.log.warn('直播暂存 QQ 消息仍待处理', {error: String(error)}));
+      if (this.streamGate.pending) this.log.info('QQ暂存队列已恢复，按当前开关和名单释放', {pending:this.streamGate.pending});
+      this.streamGate.start();
+    }
+    this.vision = new Vision(this.config.vision, this.log, this.dataDir);
+    this.stickers = new StickerStore(this.stickerDirAbs || this.emojiDirAbs || join(this.packageDir, 'emoji'), this.config.vision, this.log, this.dataDir, (name) => this.resolveSecret(name ?? ""));
+    this.syncConfigRoster();
+    this.driver = this.createDriver();
     await this.driver.start();
     this.nativeCallTimer = setInterval(() => {
       this.publishSendPolicy();
@@ -278,9 +397,9 @@ export class QQWorld implements World {
     this.aliasesFile = this.dataDir ? join(this.dataDir, 'qqbot-aliases.json') : '';
     this.loadAliases();
 
-    // 本地 ASR 侧车作为「共享服务」预热：call 通话听写与 voice 收语音识别共用同一个侧车，
+    // 本地 ASR 侧车作为「共享服务」预热：voice 收语音识别用同一个侧车，
     // 拉起条件只看 asr.mode==='local'（不再依赖 call.enabled）。异步预热，不阻塞启动。
-    if (this.config.asr.mode === 'local' && ((this.config.voice.enabled && this.config.voice.asr) || this.config.call.enabled)) {
+    if (this.config.asr.mode === 'local') {
       void this.ensureAsrSidecarAndReady()
         .then((url) => { if (url) this.log.info('[asr-sidecar] 共享侧车已就绪', { url }); })
         .catch((e) => this.log.warn('[asr-sidecar] 预热失败（首次使用时将重试）', { err: String(e) }));
@@ -330,14 +449,17 @@ export class QQWorld implements World {
       cfg,
       log: this.log,
       dataDir: this.dataDir,
-      callApi: (action, params) => this.driver.callApi(action, params),
+      callApi: (action, params) => this.driver!.callApi(action, params),
       chatCompletion: (messages) => this.qzoneCompletion(messages),
+      cognition: () => this.host?.cognition,
       getContext: () => this.qzoneContext(),
       getRecentImageUrl: () => this.recentImageUrl(),
-      resolveSecret: (name) => this.resolveSecret(name),
+      resolveImage: value => this.imageFile(value ?? ""),
+      emojiDir: this.stickerDirAbs || this.emojiDirAbs,
+      resolveSecret: (name) => this.resolveSecret(name ?? ""),
       blockedReason: () => this.qzoneBlockedReason(),
       review: async text => !this.config.contentReviewUrl || (await reviewContent(this.config.contentReviewUrl, text, 'message')).allow,
-      pushEvent: (e) => this.host.pushEvent(e as never, { trigger: 'piggyback' }),
+      pushEvent: (e) => this.host!.pushEvent(e as never, { trigger: 'piggyback' }),
       identity: () => this.identity,
     });
     this.qzone.start();
@@ -354,8 +476,18 @@ export class QQWorld implements World {
   private qzoneContext(): string {
     try {
       const events = this.host?.store?.range?.({ source: SOURCE, limit: 60 }) ?? [];
-      return events.filter(e => e.contextDelivery !== 'archive-only' && this.canRead(e.senderKey ?? ''))
-        .map((e) => e.text ?? '').filter(Boolean).join('\n').slice(-4000);
+      const rows = events.filter(e => e.contextDelivery !== 'archive-only' && this.canRead(e.senderKey ?? ''))
+        .filter(e => e.text).map(e => JSON.stringify({occurredAt: e.ts, conversation: e.senderKey,
+          senderQQ: e.meta?.user, self:e.meta?.self === true, text: e.text}));
+      for (const sent of this.recentSends.filter(row => this.canRead(row.conv))) rows.push(JSON.stringify({occurredAt:sent.at,
+        conversation:sent.conv,senderQQ:this.identity?.selfId,self:true,text:sent.text,kind:'本账号已经说过的话，不是独立的经历证据'}));
+      rows.sort((a,b) => JSON.parse(a).occurredAt.localeCompare(JSON.parse(b).occurredAt));
+      const kept: string[] = []; let used = 0;
+      for (const row of rows.reverse()) {
+        if (used + row.length + 1 > 6000) break;
+        kept.push(row); used += row.length + 1;
+      }
+      return kept.reverse().join('\n');
     } catch {
       return '';
     }
@@ -377,7 +509,7 @@ export class QQWorld implements World {
       routine: this.config.routine,
       isQuiet: () => this.isQuietHours(),
       selfName: this.resolveSelfRef(),
-      send: async (address, text) => {
+      send: async (address, text, isCurrent) => {
         if (this.host?.isPaused?.()) throw new Error('Run paused');
         const replyMode = this.checkReplyMode(address);
         if (replyMode) return replyMode;
@@ -411,6 +543,7 @@ export class QQWorld implements World {
         }
         // 先执行戳一啄动作（无文本）。
         for (const t of pokeTargets) {
+          if (isCurrent && !isCurrent()) return QQWorld.SEND_BLOCKED + '会话已更新，取消旧的主动草稿。';
           if (this.host?.isPaused?.()) throw new Error('Run paused');
           const replyMode = this.checkReplyMode(address);
           if (replyMode) return replyMode;
@@ -428,8 +561,8 @@ export class QQWorld implements World {
         const guard = this.correctMisaddressed(body.trim(), address);
         const spoken = guard.text;
         if (spoken) {
-          res = await this.sendTo(address, spoken, undefined, atQQs.length ? atQQs : undefined, new Map());
-          if (res.startsWith(QQWorld.SEND_BLOCKED) || res.startsWith(QQWorld.SEND_FAILED)) return res;
+          res = await this.sendTo(address, spoken, undefined, atQQs.length ? atQQs : undefined, new Map(), [], isCurrent);
+          if (res.startsWith(QQWorld.SEND_BLOCKED) || res.startsWith(QQWorld.SEND_FAILED) || res.startsWith(QQWorld.SEND_PARTIAL)) return res;
         }
         if (guard.wrong) {
           try {
@@ -455,10 +588,9 @@ export class QQWorld implements World {
           const clock = eventClock(this.config.timezone);
           const selfName = this.resolveSelfRef();
           const bits: string[] = [];
-          if (spoken) bits.push(`说了下面这句话：“${spoken}”`);
           if (atQQs.length) bits.push(`并 @了 ${atQQs.length} 人`);
           if (pokeTargets.length) bits.push('并戳了 ' + pokeTargets.map((t) => `${t.who}(QQ:${t.qq})`).join('、'));
-          if (!bits.length) bits.push('发了个动作（戳一啄）');
+          if (!bits.length) return res;
           const prefix = kind === 'group'
             ? `我是${selfName}。刚才(约 ${clock})我主动在QQ群「${label}」里`
             : `我是${selfName}。刚才(约 ${clock})我主动在QQ私聊里`;
@@ -482,6 +614,7 @@ export class QQWorld implements World {
       // 主动说话复用 Persona + 记忆，避免与正常对话割裂。
       systemPromptFor: (target) => this.proactiveSystemPrompt(target),
     });
+    for (const sent of this.recentSends) this.proactive.notifySent(sent.conv, Date.parse(sent.at));
     this.emotion = new EmotionEngine({
       dataDir: this.dataDir,
       decayHours: this.config.emotion.decayHours,
@@ -568,7 +701,17 @@ export class QQWorld implements World {
    *  主动说话需要「贴着事实」，故温度压到 0.5（默认 0.9 太飘，容易编造）。 */
   private async chatCompletion(messages: ChatMsg[]): Promise<string | null> {
     const cfg = this.config.proactive;
-    return this.completeChat(cfg.endpoint, cfg.apiKeySecret, cfg.model, messages, { temperature: 0.5, maxTokens: cfg.tokenLimit ?? 2000 });
+    const raw = await this.completeChat(cfg.endpoint, cfg.apiKeySecret, cfg.model, messages,
+      { temperature: 0.5, maxTokens: cfg.tokenLimit ?? 2000, json: true });
+    if (raw === null) return null;
+    try {
+      const draft = JSON.parse(raw);
+      if (!draft || Array.isArray(draft) || Object.keys(draft).length !== 1 || typeof draft.text !== 'string') throw Error('Invalid draft');
+      return draft.text.trim();
+    } catch {
+      this.log.warn('主动草稿格式无效，未发送');
+      return null;
+    }
   }
 
   /**
@@ -576,7 +719,7 @@ export class QQWorld implements World {
    * 让主动冒泡的语气与内容跟正常对话保持一致，不再「割裂」。
    */
   private proactiveSystemPrompt(target: ProactiveTarget): string {
-    const blocks: string[] = ['本次只生成发给当前会话的聊天正文。发送由程序完成，此接口没有工具；不要输出 qq_send、工具调用、JSON 指令或代码块。'];
+    const blocks: string[] = ['本次生成一个可选聊天草稿。只返回 JSON {"text":"聊天正文"}；选择安静时返回 {"text":""}。text 只含发给当前会话的正文。发送由程序完成，此接口没有工具；不要输出 qq_send、工具调用、其他字段或代码块。没有工具仅指这次后台草稿，不代表主会话不能联网。已经确认发送的回答属于你已经做过的回复，不能重新把同一请求当成未完成；没有新的失败回执，不声称网络打不开或工具不可用。'];
     // 最先钉死「现在在对谁说话」：否则模型会把长期笔记/别处记忆里的人名当成当前对象的称呼。
     const who = this.whoAmITalkingToBlock(target);
     if (who) blocks.push(who);
@@ -585,7 +728,7 @@ export class QQWorld implements World {
     if (recent) {
       blocks.push(
         '## 这个会话最近的真实对话（只基于这里出现过的内容说话，没出现过的事件/计划/细节一律不要编造）\n' +
-          '（行首标了 [我] 的是你自己以前说过的话。若里面出现把你对话对象叫成别的名字的，那是当时口误，一律不要沿用。）\n' +
+          '（每行保留消息时间与说话人。[我] 是你以前说过的话，不是对方的新回复，也不能单独证明约定或事实成立。临时请求按当时语境理解，不跨天自动追补；注意对方是否已接话。若以前叫错对方名字，不要沿用。）\n' +
           recent,
       );
     }
@@ -615,8 +758,9 @@ export class QQWorld implements World {
         this.config.proactive.systemPrompt +
           '\n\n【硬性约束】主动说话只能基于上面「真实对话」与「记忆」里出现过的内容。' +
           '严禁编造：不要引用没发生过的「上次/上回」、对方从没提过的计划或偏好、对话里没出现过的细节。' +
-          '如果上面的真实对话/记忆里没什么可接的，就聊点当下泛泛的关心或问候（天气、心情、摸鱼），' +
-          '或者返回空内容（什么都不发）也完全可以——绝对不要为了凑话题而虚构具体事件。' +
+          '没有值得分享的新内容时返回 {"text":""}；不以泛泛问候、照顾或重述旧约定填空。' +
+          '已经确认、已经结束的旧话题，对方没有再提就不追问进展，也不用重新点评它来找话。' +
+          '有真实话题时可以自然分享自己的看法、感受或好奇，不必等待对方给每句话下指令；绝对不要虚构具体事件。' +
           '\n\n【主动动作（可选）】除了说话，你还可以主动 @人 或 戳一啄：' +
           '在生成内容里用 `@昵称` 或 `@QQ号` 来 @某人；用 `[[poke:昵称或QQ号]]` 来戳一啄某人' +
           '（戳一啄是无文本的动作，可以单独发，也可以和说话一起）。注意：' +
@@ -667,7 +811,7 @@ export class QQWorld implements World {
   private routineSegmentText(): string {
     const quiet = [
       `【QQ回复开关】群聊${this.config.replyGroups ? '开启' : '关闭'}；私聊${this.config.replyPrivates ? '开启' : '关闭'}。关闭的渠道不接收消息或通知，也禁止发送文字、图片、语音、戳一戳或主动互动。`,
-      `【QQ私聊条数】每个私聊每轮回复${this.config.maxPrivateMessagesPerReply > 0 ? '最多 ' + this.config.maxPrivateMessagesPerReply + ' 条（含文字、图片和语音，分句超出时合并）' : '不限条数'}；不要拆成多次调用绕过限制。`,
+      `【QQ私聊条数】对同一条来信的回复${this.config.maxPrivateMessagesPerReply > 0 ? '最多 ' + this.config.maxPrivateMessagesPerReply + ' 条（文字、图片、语音共用，多次调用及后续回合不重置）' : '不限条数'}。几个字也能独立成消息，用换行分段，默认简短回应后等对方；不要把上限用满。私聊不引用，所有 QQ 输出禁止原生表情；收藏表情用真实文件名，普通图片用 images。`,
       this.qzone ? `【QQ空间发送限制】${this.qzoneBlockedReason() ?? '当前允许操作，只有工具返回成功才能认为已发布。'} 失败后等待限制解除，不要反复调用。` : '',
       `【QQ连接】${this.connected ? '已连接' : '未连接，禁止尝试发送，等待连接恢复'}。`,
       this.config.replyPrivates ? `【已开放读取的监听私聊】${toIds(this.config.privates).map(id => `${this.privateLabel(id)}${[...this.aliases].filter(([,qq])=>qq===id).map(([alias])=>` / ${alias}`).join('')}（to=private:${id}）`).join('；') || '无'}。无历史记录不代表会话关闭；按本条当前限制判断能否发送，不沿用旧笔记里的关闭判断。` : '',
@@ -781,8 +925,9 @@ export class QQWorld implements World {
       if (!this.canRead(address)) return null;
       const blocked = event.meta?.history ? '历史补读不回复' : this.incomingReplyBlock(address);
       meta.replyAllowed = !blocked;
+      if (!blocked && event.type === 'qq.message' && address.startsWith('private:') && event.meta?.inputRejected) this.pendingFilteredReplies.add(address);
       if (!blocked && event.type === 'qq.message' && (address.startsWith('private:') || event.meta?.atMe)) this._pendingReplyConvs.add(address);
-      return {text:`【原消息时间 ${meta.sourceTs}】\n${blocked ? `【QQ仅供记录，禁止回复：${blocked}】\n` : ''}${event.text}`, blobs:archived.blobs};
+      return {text:`【原消息时间 ${meta.sourceTs}】\n${blocked ? `【QQ仅供记录，禁止回复：${blocked}】\n` : ''}${event.meta?.inputRejected ? '【本条输入被审核拦截，回合结束时程序发送一次 filtered；不要回答敏感内容、复述原文或追加其他回复。】\n' : ''}${event.text}`, blobs:archived.blobs};
     }}, {trigger:blockedNow ? 'piggyback' : trigger});
   }
 
@@ -894,21 +1039,31 @@ export class QQWorld implements World {
   private recentContextFor(address: string): string {
     if (!this.canRead(address)) return '';
     try {
-      const events = (this.host?.store?.range?.({ source: SOURCE, senderKey: address, limit: 60 }) ?? []) as Array<{
-        text?: string;
-        meta?: Record<string, unknown>;
-        contextDelivery?: string;
-      }>;
-      const lines = events
-        .filter((e) => e.contextDelivery !== 'archive-only' && e.text && e.text.trim())
-        .map((e) => {
-          const body = e.text!.replace(/\s+/g, ' ').trim();
+      const events = this.host?.store?.range?.({source: SOURCE, senderKey: address, limit: 60}) ?? [];
+      const confirmed = new Set<string>();
+      const rows = events
+        .filter(e => e.contextDelivery !== 'archive-only' && e.text.trim())
+        .map(event => {
+          const original = typeof event.meta?.sourceCursor === 'number' ? this.host?.store?.get?.(event.meta.sourceCursor) : undefined;
+          const e = original?.source === SOURCE && original.senderKey === address ? original : event;
+          const body = (e.type === 'qq.sent' && typeof e.meta?.text === 'string' ? e.meta.text : e.text).replace(/\s+/g, ' ').trim();
+          if (e.type === 'qq.sent' && e.meta?.textOnly === true && typeof e.meta?.messageId === 'string') confirmed.add(e.meta.messageId);
           const isSelf = e.meta?.self === true || e.meta?.role === 'assistant';
-          return (isSelf ? '[我] ' : '') + body;
-        })
-        .slice(-40);
-      const joined = lines.join('\n');
-      return joined.length > 3000 ? joined.slice(-3000) : joined;
+          const speaker = e.meta?.role === 'system' ? '[记录]' : isSelf ? '[我]' : '[对方]';
+          return {at: e.ts, speaker, text: body};
+        });
+      for (const sent of this.recentSends.filter(row => row.conv === address)) {
+        if (sent.messageIds.length && sent.messageIds.every(id => confirmed.has(id))) continue;
+        rows.push({at:sent.at, speaker:'[我，协议已确认发送]', text:sent.text});
+      }
+      rows.sort((a,b) => (Date.parse(a.at) || 0) - (Date.parse(b.at) || 0));
+      const lines: string[] = []; let used = 0;
+      for (const row of rows.slice(-40).reverse()) {
+        const line = `[${row.at}] ${row.speaker} ${row.text.length > 1200 ? row.text.slice(0,1200) + '…[后文省略]' : row.text}`;
+        if (used + line.length + 1 > 3000) break;
+        lines.unshift(line); used += line.length + 1;
+      }
+      return lines.join('\n');
     } catch {
       return '';
     }
@@ -926,7 +1081,7 @@ export class QQWorld implements World {
     apiKeySecret: string,
     model: string,
     messages: ChatMsg[],
-    opts?: { temperature?: number; maxTokens?: number },
+    opts?: { temperature?: number; maxTokens?: number; json?: boolean },
   ): Promise<string | null> {
     const apiKey = this.resolveSecret(apiKeySecret);
     if (!apiKey) {
@@ -949,7 +1104,8 @@ export class QQWorld implements World {
         method: 'POST',
         signal: ctrl.signal,
         headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify({ model, messages, temperature: opts?.temperature ?? 0.9, max_tokens: opts?.maxTokens ?? 200 }),
+        body: JSON.stringify({ model, messages, temperature: opts?.temperature ?? 0.9, max_tokens: opts?.maxTokens ?? 200,
+          ...(opts?.json ? {response_format: {type: 'json_object'}} : {}) }),
       });
       if (!res.ok) {
         this.log.warn('动态/主动说话模型返回非 200', { status: res.status });
@@ -1057,9 +1213,10 @@ export class QQWorld implements World {
   private loadState(): void {
     if (!this.stateFile || !existsSync(this.stateFile)) return;
     try {
-      const raw = JSON.parse(readFileSync(this.stateFile, 'utf8')) as { knownMessages?: Record<string, { conv: string; ts: number }> };
+      const raw = JSON.parse(readFileSync(this.stateFile, 'utf8')) as { knownMessages?: Record<string, { conv: string; ts: number }>; recentSends?: Array<{conv:string;at:string;text:string;messageIds:string[]}> };
       const km = raw.knownMessages ?? {};
       for (const [k, v] of Object.entries(km)) this.knownMessages.set(k, { conv: v.conv, ts: v.ts });
+      this.recentSends = (raw.recentSends ?? []).filter(row => typeof row.conv === 'string' && typeof row.text === 'string' && Number.isFinite(Date.parse(row.at)) && Array.isArray(row.messageIds)).slice(-24);
       this.log.info('已恢复 knownMessages', { count: this.knownMessages.size });
     } catch (e) {
       this.log.warn('读取 qqbot 状态失败', { err: String(e) });
@@ -1069,7 +1226,7 @@ export class QQWorld implements World {
   private saveState(): void {
     if (!this.stateFile) return;
     try {
-      const obj = { knownMessages: Object.fromEntries(this.knownMessages) };
+      const obj = { knownMessages: Object.fromEntries(this.knownMessages), recentSends:this.recentSends };
       writeFileSync(this.stateFile, JSON.stringify(obj), 'utf8');
     } catch (e) {
       this.log.warn('保存 qqbot 状态失败', { err: String(e) });
@@ -1260,7 +1417,7 @@ export class QQWorld implements World {
         type: 'qq.group-request',
         ts: eventTs(this.config.timezone, sentAt ?? new Date()),
         source: SOURCE,
-        text: `有人申请加入群 ${groupId}（QQ ${userId}，类型=${subType === 'invite' ? '邀请' : '主动申请'}），留言：${comment || '（无）'}。这是一条加群请求（flag=${flag}），需要你决定是否通过。可用 qq_admin_join_list 查看全部待审、qq_admin_join_approve 通过、qq_admin_join_reject 拒绝。`,
+        text: `有人申请加入群 ${groupId}（QQ ${userId}，类型=${subType === 'invite' ? '邀请' : '主动申请'}），留言：${comment || '（无）'}。这是一条加群请求（flag=${flag}），需要你决定是否通过。可用 qq_admin_join_list 查看全部待审、qq_admin_join_decide(decision=approve 或 reject) 审核。`,
         senderKey: `group:${groupId}`,
         meta: { conv: `group:${groupId}`, role: 'system', requestFlag: flag },
       }, 'piggyback');
@@ -1285,7 +1442,7 @@ export class QQWorld implements World {
       return;
     }
     // QQ 空间互动事件（评论/点赞等）：交给 qzone 发布器处理，不进入聊天消息流。
-    if (ev.post_type === 'qzone' || ev.post_type === 'interact' || /qzone/i.test(String((ev as Record<string, unknown>).detail_type ?? (ev as Record<string, unknown>).sub_type ?? ''))) {
+    if (ev.post_type === 'qzone' || ev.post_type === 'interact' || /qzone/i.test(String((ev as unknown as Record<string, unknown>).detail_type ?? (ev as unknown as Record<string, unknown>).sub_type ?? ''))) {
       if (this.qzone) void this.enqueue(() => this.qzone!.onEvent(ev as unknown as Record<string, unknown>));
       return;
     }
@@ -1354,7 +1511,7 @@ export class QQWorld implements World {
     if (kind === 'group' && this.driver) {
       // 名片可能为空，尝试补一次群成员信息
       if (!s.card && (s.nickname === undefined || s.nickname === '')) {
-        void this.driver.getMemberInfo(id, userId).then((info) => {
+        void this.driver!.getMemberInfo(id, userId).then((info) => {
           if (info) {
             const c = this.convs.get(`group:${id}`);
             if (c?.members) {
@@ -1471,6 +1628,7 @@ export class QQWorld implements World {
     if (!text && !segs.some((s) => s.type === 'image' || s.type === 'record' || s.type === 'forward' || s.type === 'sticker' || s.type === 'face')) return;
 
     const blobs: BlobInput[] = [];
+    let videoHandled = false;
     for (const s of segs) {
       if (s.type === 'image' && (s.data as { url?: string }).url) {
         const url = (s.data as { url: string }).url!;
@@ -1515,10 +1673,20 @@ export class QQWorld implements World {
           const summary = typeof sd.summary === 'string' ? sd.summary : '';
           if (!this.host?.isPaused?.()) this.stickers.ingest(url, conv.address, summary);
         }
+      } else if (s.type === 'video') {
+        let preview: { text: string; blob?: BlobInput } = { text: '[视频未读取：当前模型或配置未启用图片附件]' };
+        if (videoHandled) preview.text = '[视频未读取：每条消息最多预览一个视频]';
+        else if (this.host?.isPaused?.()) preview.text = '[视频未读取：运行已暂停]';
+        else if (this.config.deliverImageAttachments && host.modelFacts.accepts('image/jpeg')) {
+          preview = await previewVideo(String(s.data.url ?? ''), buildFfmpegCandidates(this.config.asr.ffmpegPath, this.packageDir), this.dataDir);
+        }
+        videoHandled = true;
+        text += '\n' + preview.text;
+        if (preview.blob) blobs.push(preview.blob);
       } else if (s.type === 'record') {
         let asText = false;
         if (this.config.voice.enabled && this.config.voice.asr) {
-          const transcribed = await transcribeRecord(s, (ev as { message_id?: number }).message_id, this.driver, this.voiceRuntime(), this.log);
+          const transcribed = await transcribeRecord(s, (ev as { message_id?: number }).message_id, this.driver!, this.voiceRuntime(), this.log);
           if (transcribed) {
             if (text) text += '\n';
             text += `[语音转写] ${transcribed}`;
@@ -1526,15 +1694,16 @@ export class QQWorld implements World {
           }
         }
         if (!asText && (this.config.voice.enabled ? this.config.voice.audioFallback : true)) {
-          const wav = await decodeRecord(s, this.driver, this.voiceRuntime(), this.log);
+          const wav = await decodeRecord(s, this.driver!, this.voiceRuntime(), this.log);
           if (wav) blobs.push({ bytes: wav, mime: 'audio/wav', name: 'qq-voice', fallbackText: '[语音]' });
         }
       }
     }
 
+    let inputRejected = false;
     if (this.config.contentReviewUrl && text.trim()) {
-      try {text = await reviewMemory(this.config.contentReviewUrl, text, 'received');}
-      catch {text = '[收到一条消息，内容审核暂不可用，原文未进入对话]';}
+      try {text = await reviewMemory(this.config.contentReviewUrl, text, 'received', () => {inputRejected = true;});}
+      catch {inputRejected = true; text = '[收到一条消息，内容审核暂不可用，原文未进入对话]';}
     }
 
     // 语义判定：是否应当用语音回复（对齐 qq_bot 的 _judge_voice）。
@@ -1555,9 +1724,10 @@ export class QQWorld implements World {
       title: sender.title,
       platformMessageId: String(ev.message_id ?? ''),
       channel: 'qq',
+      inputRejected,
     };
 
-    if (conv.kind === 'private' && this.config.privateAggregationWindow > 0 && !this.incomingReplyBlock(conv.address)) {
+    if (conv.kind === 'private' && !inputRejected && this.config.privateAggregationWindow > 0 && !this.incomingReplyBlock(conv.address)) {
       this.aggregatePrivate(conv, sender, text, blobs, baseMeta);
       return;
     }
@@ -1624,7 +1794,9 @@ export class QQWorld implements World {
           await this.sendTo(conv.address, await this.callFarewell(conv.address));
           return;
         }
-      } else if (matchAnyWord(plain, this.config.call.triggerWords)) {
+      } else if (this.config.call.mode === 'simulated'
+        && this.toWordList(this.config.call.triggerWords).some(word => plain === word.toLowerCase())
+        && !this.checkQuiet(conv.address)) {
         await this.startCall(conv.address);
         return;
       }
@@ -1654,6 +1826,7 @@ export class QQWorld implements World {
     if (pend && now - pend.firstAt < win) {
       // 仍在窗口内：累积到暂存文本，已排定的到期冲刷计时器保持不变
       pend.text += `\n${senderTag}：${text}`;
+      pend.blobs.push(...blobs);
       return;
     }
     // 窗口已过期（或无暂存）：先把上一段冲刷出去（如有），再开新的一段并排定到期冲刷
@@ -1669,10 +1842,10 @@ export class QQWorld implements World {
         text: pend.text,
         senderKey: conv.address,
         meta: { ...meta, sourceTs:pend.sourceTs, sender: '对话' },
-        blobs: undefined,
+        blobs: pend.blobs,
       });
     }
-    conv.pendingAggregatedText = { text: `${senderTag}：${text}`, firstAt: now, sourceTs:String(meta.sourceTs ?? new Date(now).toISOString()) };
+    conv.pendingAggregatedText = { text: `${senderTag}：${text}`, blobs: [...blobs], firstAt: now, sourceTs:String(meta.sourceTs ?? new Date(now).toISOString()) };
     const segMeta = meta;
     conv.aggregationTimer = setTimeout(() => {
       conv.aggregationTimer = undefined;
@@ -1687,21 +1860,21 @@ export class QQWorld implements World {
         text: p.text,
         senderKey: conv.address,
         meta: { ...segMeta, sourceTs:p.sourceTs, sender: '对话' },
-        blobs: undefined,
+        blobs: p.blobs,
       });
     }, win);
   }
 
   /**
-   * 输出流接收器：实时累积模型本轮的“正文”文本（仅 output_text.delta，不含思考链/拒答）。
-   * 用于回合收束时兜底把模型文本自动发往应回复的会话。
+   * 只从完整响应提取明确标为 final_answer 的正文，供私聊回复兜底使用。
    */
   outputTap() {
     return {
       onEvent: (event: any): void => {
-        if (event && event.type === 'response.output_text.delta' && typeof event.delta === 'string') {
-          this._tapBuf += event.delta;
-        }
+        if (event?.type === 'response.created') this._tapBuf = '';
+        if (event?.type === 'response.completed') this._tapBuf = (event.response?.output ?? [])
+          .filter((item:any) => item.type === 'message' && item.role === 'assistant' && item.status === 'completed' && item.phase === 'final_answer')
+          .flatMap((item:any) => item.content.filter((part:any) => part.type === 'output_text').map((part:any) => part.text)).join('\n');
       },
       onRoundEnd: (): void => {},
       onAbort: (): void => { this._tapBuf = ''; },
@@ -1717,10 +1890,15 @@ export class QQWorld implements World {
     this.pendingSends.clear();
     const buf = this._tapBuf.trim();
     const pending = [...this._pendingReplyConvs];
+    for (const address of this.pendingFilteredReplies) {
+      if (!this.filteredReplyAttempts.has(address) && !this.checkQuiet(address)) {
+        void this.sendTo(address, 'filtered').catch(error => this.log.warn('filtered 回执发送失败', {address,error:String(error)}));
+      }
+    }
     // 仅当“单一待回复会话且本轮未对其发送、且有文本”时兜底，避免多消息歧义或串轮误发。
     if (pending.length === 1) {
       const conv = pending[0];
-      if (!this._sentThisTurn.has(conv) && buf && !this.checkQuiet(conv)) {
+      if (!this.pendingFilteredReplies.has(conv) && !this._sentThisTurn.has(conv) && buf && !this.checkQuiet(conv)) {
         this.log.warn('兜底自动发送：入站消息未调 qq_send，按模型文本回复', { conv, len: buf.length });
         void this.sendTo(conv, buf).catch((e) => this.log.warn('兜底自动发送失败', { err: String(e) }));
       }
@@ -1729,6 +1907,8 @@ export class QQWorld implements World {
     this._sentThisTurn.clear();
     this.privateReplyCounts = new Map();
     this._pendingReplyConvs.clear();
+    this.pendingFilteredReplies.clear();
+    this.filteredReplyAttempts.clear();
   }
 
   /** 实时拉取被引用消息（对齐 fat-fish get_quoted_message 的 get_msg 路径）。 */
@@ -1801,13 +1981,25 @@ export class QQWorld implements World {
     }
   }
 
-  /** 从文本或显式 hint 解析引用消息编号（对齐内置 qq 的 #<id> 约定）。 */
-  private resolveReplyMessageId(text: string, idHint?: number): number | undefined {
-    if (idHint != null && Number.isFinite(idHint)) return idHint;
-    // 注意：NapCat 推来的 message_id 偶发为负数（int32 溢出），#编号可能形如 #-158564853，
-    // 故正则必须允许负号，否则引用这类消息时提取不到 id、引用失败。
-    const m = String(text ?? '').match(/#(-?\d+)/);
-    return m ? Number(m[1]) : undefined;
+  private replyProgress(address?: string): string {
+    const rows: typeof this.recentSends = [];
+    let used = 0;
+    for (const row of this.recentSends.filter(row => (!address || row.conv === address) && this.canRead(row.conv)).reverse()) {
+      const shown = {...row,text:row.text.length > 1200 ? row.text.slice(0,1200) + '…[本条后文省略]' : row.text};
+      const size = JSON.stringify(shown).length;
+      if (rows.length >= 12 || used + size > 6000) break;
+      rows.unshift(shown); used += size;
+    }
+    if (!rows.length) return '';
+    return '【QQ已发送记录｜只作衔接，不是待回复消息】\n' + JSON.stringify(rows) +
+      '\n按对方最新输入接话；已经答过的问题、外观介绍、索要奖励和反问，即使换词也算重复，不要重答、再索取或补发。没有新信息可以结束本轮。交接或重启不构成重发理由；引用时只填 reply_message_id，正文不含内部编号。';
+  }
+
+  private recordSent(address:string, text:string, messageIds:string[]): void {
+    if (!text.trim()) return;
+    this.recentSends.push({conv:address,at:new Date().toISOString(),text,messageIds});
+    this.recentSends = this.recentSends.slice(-24);
+    this.scheduleSaveState();
   }
 
   /**
@@ -1991,7 +2183,7 @@ export class QQWorld implements World {
   }
 
   private latestReplyCursor(address: string): number {
-    return this.host?.store?.range({source: SOURCE, limit: 500}).filter(event => event.origin === 'external'
+    return this.host?.store?.range({source: SOURCE, senderKey: address, limit: 500}).filter(event => event.origin === 'external'
       && event.type === 'qq.message' && event.contextDelivery !== 'archive-only' && !event.meta?.history
       && event.senderKey === address).at(-1)?.cursor ?? 0;
   }
@@ -2026,31 +2218,94 @@ export class QQWorld implements World {
       ? QQWorld.SEND_BLOCKED + '静默时段仅回复私聊，群聊消息未发送。' : null;
   }
 
-  private async sendMessage(address: string, params: Record<string, unknown>, counts = this.privateReplyCounts): Promise<any> {
+  private replyCounts(address: string): Map<string, number> {
+    const cursor = address.startsWith('private:') ? this.latestReplyCursor(address) : 0;
+    if (!cursor) return this.privateReplyCounts;
+    let budget = this.privateReplyBudgets.get(address);
+    if (!budget || budget.cursor !== cursor) {
+      budget = {cursor, counts: new Map()};
+      this.privateReplyBudgets.set(address, budget);
+    }
+    return budget.counts;
+  }
+
+  private imageFile(value: string): string {
+    if (/^https?:\/\//i.test(value)) {
+      const url = new URL(value);
+      if (!url.username && !url.password) return url.href;
+    }
+    if (/^base64:\/\/[A-Za-z0-9+/]+=*$/.test(value) && value.length <= 24 * 1024 * 1024) return value;
+    if (/^(log|mem):/.test(value)) {
+      const image = this.host?.blob(value);
+      if (image && /^image\/(png|jpeg|gif|webp)$/.test(image.mime) && image.bytes.length <= 16 * 1024 * 1024) {
+        return 'base64://' + Buffer.from(image.bytes).toString('base64');
+      }
+    }
+    const root = this.stickerDirAbs || this.emojiDirAbs;
+    const file = root && resolveEmojiFile(root, value);
+    if (file && /\.(png|jpe?g|gif|webp)$/i.test(file)) {
+      if (statSync(file).size <= 16 * 1024 * 1024) return 'base64://' + readFileSync(file).toString('base64');
+    }
+    throw new Error('图片需为实际图片 URL、log:/mem: 图片附件或表情库真实文件名；不允许任意本机文件路径。');
+  }
+
+  private async sendMessage(address: string, params: Record<string, unknown>, counts = this.replyCounts(address), beforeSend?: () => boolean): Promise<any> {
+    if (Array.isArray(params.message)) {
+      params = {...params, message: params.message.filter(segment => segment.type !== 'face'
+        && !(address.startsWith('private:') && segment.type === 'reply'))};
+      if (!(params.message as unknown[]).length) throw new Error('没有可发送内容；禁止使用 QQ 原生表情。');
+    }
     const limit = address.startsWith('private:') ? this.config.maxPrivateMessagesPerReply : 0;
     const count = counts.get(address) ?? 0;
     if (limit > 0 && count >= limit) throw new Error('私聊本轮回复已达 ' + limit + ' 条上限，请等待下一轮消息，不要重试。');
+    if (beforeSend && !beforeSend()) throw new Error('会话已更新，取消旧的主动草稿。');
     counts.set(address, count + 1);
-    try {return await this.driver!.callApi('send_msg',params);}
+    let result: any;
+    try {result = await this.driver!.callApi('send_msg',params);}
     catch (error) {counts.set(address,(counts.get(address) ?? 1) - 1);throw error;}
+    this.proactive?.notifySent(address);
+    const segments = params.message as OneBotSegment[];
+    const text = renderSegmentsPlain(segments);
+    const messageId = result?.message_id != null ? String(result.message_id) : undefined;
+    this.log.info(`QQ已发送 ${this.convLabel(address)}（消息 ${messageId ?? '未返回编号'}）：${text.replace(/\s+/g, ' ')}`, {address, messageId, text});
+    try {
+      await this.host?.pushEvent?.({type:'qq.sent', source:SOURCE, origin:'external', senderKey:address,
+        ts:eventTs(this.config.timezone), text:`【QQ发送回执｜本账号已发送】${text}\n这是实际发送记录，不是对方的新消息，无需回复本回执。`,
+        meta:{conv:address, self:true, role:'assistant', text, messageId, textOnly:segments.every(s => ['text','at','reply'].includes(s.type)), delivery:'confirmed'}}, {trigger:'piggyback'});
+    } catch (error) {this.log.warn('QQ已发送回执落库失败，不重发已确认消息', {address,messageId,error:String(error)});}
+    return result;
   }
 
-  private async sendTo(address: string, text: string, replyMessageId?: number, atQQs?: number[], counts = this.privateReplyCounts): Promise<string> {
+  private async sendTo(address: string, text: string, replyMessageId?: number, atQQs?: number[], counts = this.replyCounts(address), images: string[] = [], isCurrent?: () => boolean, voice?: boolean): Promise<string> {
+    let started = false;
+    const beforeSend = () => {
+      if (started) return true;
+      if (isCurrent && !isCurrent()) return false;
+      started = true; return true;
+    };
+    if (address.startsWith('private:')) replyMessageId = undefined;
     if (this.host?.isPaused?.()) throw new Error('Run paused');
     const quiet = this.checkQuiet(address);
     if (quiet) return quiet;
+    if (this.pendingFilteredReplies.has(address)) {
+      this.filteredReplyAttempts.add(address);
+      text = 'filtered'; images = []; replyMessageId = undefined; atQQs = undefined; this.voiceWish.delete(address);
+    }
     try { text = outgoingChatText(text, address); }
     catch (error) {
       this.log.warn('拦截聊天正文中的工具指令', {address, error: String(error)});
       return QQWorld.SEND_BLOCKED + String(error);
     }
+    const leakedId = [...text.matchAll(/#(-?\d+)/g)].find(match => this.knownMessages.has(match[1]));
+    if (leakedId) return QQWorld.SEND_BLOCKED + '正文包含内部消息编号，尚未发送。需要引用时将编号填入 reply_message_id，并从 text 移除编号；不需要引用时只保留自然语言正文。';
     if (!this.driver) return QQWorld.SEND_BLOCKED + '未连接到 QQ 协议端，等待连接恢复后再发送。';
     const replyCursor = this.latestReplyCursor(address);
-    if (this.config.contentReviewUrl) {
-      const decision = this.config.contentReviewUrl ? await reviewContent(this.config.contentReviewUrl, text, 'message') : {allow:true};
+    if (this.config.contentReviewUrl && text.trim()) {
+      const decision = await reviewContent(this.config.contentReviewUrl, text, 'message');
       if (this.host?.isPaused?.()) throw new Error('Run paused');
       if (!decision.allow) {
         text = 'filtered';
+        images = [];
         this.voiceWish.delete(address);
         replyMessageId = undefined;
         atQQs = undefined;
@@ -2060,18 +2315,34 @@ export class QQWorld implements World {
     // 系统级真接电话：通话中 AI 的回复通过音频桥实时播报给通话对面，不发送 QQ 消息
     const changed = this.checkQuiet(address);
     if (changed) return changed;
-    if (text !== 'filtered' && this.inCall.has(address) && this.config.call.mode === 'system') {
-      return await this.systemSpeak(address, text);
+    if (isCurrent && !isCurrent()) return QQWorld.SEND_BLOCKED + '会话已更新，取消旧的主动草稿。';
+    text = text.replace(/\\n/g, '\n');
+    const missingStickers: string[] = [];
+    let outgoing: OneBotSegment[];
+    try {
+      outgoing = buildOutgoing(text, this.stickerDirAbs || this.emojiDirAbs, marker => missingStickers.push(marker));
+      outgoing.push(...images.map(value => ({type: 'image' as const, data: {file: this.imageFile(value), sub_type: 0}})));
+    } catch (error) {return QQWorld.SEND_BLOCKED + String(error);}
+    if (missingStickers.length) {
+      for (const marker of missingStickers) text = text.replaceAll(marker, '');
+      text = text.trim();
+      this.log.warn('无效表情包已跳过，保留其余有效回复', {address, markers:missingStickers});
+    }
+    const stickerNote = missingStickers.length
+      ? `（未附上 ${missingStickers.length} 个无效表情包标记，只发送其余有效内容；无需补图，不要重发正文。以后确需表情包时只复制 qq_sticker_stats 返回的完整标记。）` : '';
+    if (!outgoing.some(segment => segment.type !== 'text' || segment.data.text.trim())) {
+      return QQWorld.SEND_BLOCKED + (missingStickers.length ? '表情包不存在，且没有有效正文，本次未发送；下次先用 qq_sticker_stats 取真实标记，不编造文件名。' : '正文只有禁止的 QQ 原生表情，未发送；请用文字或收藏表情包。');
+    }
+    if (!outgoing.some(segment => segment.type === 'image') && text !== 'filtered' && this.inCall.has(address) && this.config.call.mode === 'system') {
+      return await this.systemSpeak(address, text) + stickerNote;
     }
     const limit = address.startsWith('private:') ? this.config.maxPrivateMessagesPerReply : 0;
     if (limit > 0 && (counts.get(address) ?? 0) >= limit) return QQWorld.SEND_BLOCKED + '私聊本轮回复已达 ' + limit + ' 条上限，请等待下一轮消息，不要重试。';
-    // 模型(尤其 DeepSeek)常在回复里把换行写成字面 "\n"(反斜杠+字母n 两字符)。
-    // OneBot 会原样发到 QQ 显示成字符,故这里归一化为真实换行符。
-    text = text.replace(/\\n/g, '\n');
-    const norm = text.replace(/\s+/g, ' ').trim();
+    const norm = text.replace(/([。！？!?；;])\s+/g, '$1').replace(/\s+/g, ' ').trim() + (images.length ? JSON.stringify(images) : '');
     const prev = this.dedupSends.get(address);
-    if (prev && prev.norm === norm && Date.now() - prev.ts < 6000) {
-      this.log.info('发送去重：跳过 6s 内同会话相同内容', { address, len: norm.length });
+    if (prev && prev.norm === norm && ((replyCursor > 0 && prev.replyCursor === replyCursor)
+      || (Date.now() - prev.ts < 6000 && (text !== 'filtered' || !replyCursor || prev.replyCursor === replyCursor)))) {
+      this.log.info('发送去重：跳过同一入站消息的重复回复或 6s 内重复内容', { address, len: norm.length });
       return '（去重：与刚刚发送的内容相同，已跳过重复发送）';
     }
     const gl = this.checkGroupSpeak(address);
@@ -2082,11 +2353,17 @@ export class QQWorld implements World {
     const id = Number(idStr);
     const paramsBase: Record<string, unknown> =
       kind === 'group' ? { message_type: 'group', group_id: id } : { message_type: 'private', user_id: id };
-    const wantVoice = text !== 'filtered' && this.config.voice.enabled && this.config.voice.tts && (this.voiceWish.get(address) === true || (this.inCall.has(address) && this.config.call.forceVoice));
+    if (voice === true && text !== 'filtered') {
+      if (!this.config.voice.enabled || !this.config.voice.tts) return QQWorld.SEND_BLOCKED + 'QQ 语音发送未开启。';
+      if (outgoing.some(segment => segment.type === 'image')) return QQWorld.SEND_BLOCKED + '语音请只填写要朗读的正文，图片另发。';
+    }
+    const wantVoice = !outgoing.some(segment => segment.type === 'image') && text !== 'filtered' && this.config.voice.enabled && this.config.voice.tts && (voice ?? (this.voiceWish.get(address) === true || (this.inCall.has(address) && this.config.call.forceVoice)));
+    let voiceFallback = '';
+
     if (wantVoice) {
       this.voiceWish.delete(address);
       if (this.inCall.has(address) && this.config.call.streamChunks) {
-        return await this.sendVoiceStreaming(text, address, replyMessageId, atQQs, counts);
+        return await this.sendVoiceStreaming(text, address, replyMessageId, atQQs, counts, beforeSend) + stickerNote;
       }
       const rec = await synthesizeVoice(text, address, this.driver, this.voiceRuntime(), this.log);
       if (rec) {
@@ -2098,15 +2375,16 @@ export class QQWorld implements World {
           if (this.host?.isPaused?.()) throw new Error('Run paused');
           const quiet = this.checkQuiet(address);
           if (quiet) return quiet;
-          const r: any = await this.sendMessage(address, { ...paramsBase, message: segs }, counts);
+          const r: any = await this.sendMessage(address, { ...paramsBase, message: segs }, counts, beforeSend);
           if (r?.message_id != null) {
             this.knownMessages.set(String(r.message_id), { conv: address, ts: Date.now() });
             this.scheduleSaveState();
           }
           this.recordGroupSpeak(address);
           this.recordAntiLoop(address, replyCursor);
-          this.dedupSends.set(address, { norm, ts: Date.now() });
-          return `已向 ${this.convLabel(address)} 发送语音 1 段。`;
+          this.dedupSends.set(address, { norm, ts: Date.now(), replyCursor });
+          this.recordSent(address, text, r?.message_id != null ? [String(r.message_id)] : []);
+          return `已向 ${this.convLabel(address)} 发送语音 1 段。${stickerNote}`;
         } catch (e) {
           this.log.warn('语音发送失败，回退文字', {
             err: String(e),
@@ -2117,9 +2395,9 @@ export class QQWorld implements World {
       } else {
         this.log.warn('TTS 合成失败，回退文字发送');
       }
+      voiceFallback = '语音未成功，已回退文字。';
     }
 
-    const outgoing = buildOutgoing(text, this.emojiDirAbs || this.stickerDirAbs);
     if (atQQs && atQQs.length) {
       for (const qq of atQQs) outgoing.unshift({ type: 'at', data: { qq } });
     }
@@ -2136,18 +2414,18 @@ export class QQWorld implements World {
       messages[0] = [{ type: 'reply', data: { id: replyMessageId } }, ...messages[0]];
     }
     let ok = 0;
-    let total = 0;
+    const validMessages = messages.map(segs => segs.filter(s => !(s.type === 'text' && !((s.data as {text?:string}).text ?? '').trim()))).filter(segs => segs.length);
+    const total = validMessages.length;
     const ids: string[] = [];
-    for (const segs of messages) {
-      const valid = segs.filter((s) => !(s.type === 'text' && !((s.data as { text?: string }).text ?? '').trim()));
-      if (!valid.length) continue;
-      total++;
+    const confirmedText: string[] = [];
+    for (const valid of validMessages) {
       try {
         if (this.host?.isPaused?.()) throw new Error('Run paused');
         const quiet = this.checkQuiet(address);
-        if (quiet) return quiet;
-        const r: any = await this.sendMessage(address, { ...paramsBase, message: valid }, counts);
+        if (quiet) {if (ok === 0) return quiet; break;}
+        const r: any = await this.sendMessage(address, { ...paramsBase, message: valid }, counts, beforeSend);
         ok++;
+        confirmedText.push(...valid.filter(segment => segment.type === 'text').map(segment => String((segment.data as {text?:string}).text ?? '')));
         if (r?.message_id != null) {
           this.knownMessages.set(String(r.message_id), { conv: address, ts: Date.now() });
           ids.push(String(r.message_id));
@@ -2164,9 +2442,10 @@ export class QQWorld implements World {
       if (this.config.sendIntervalMs > 0) await sleep(this.config.sendIntervalMs);
     }
     if (ok > 0) {
+      this.recordSent(address, confirmedText.join(''), ids);
       this.recordGroupSpeak(address);
       this.recordAntiLoop(address, replyCursor);
-      this.dedupSends.set(address, { norm, ts: Date.now() });
+      this.dedupSends.set(address, { norm, ts: Date.now(), replyCursor });
       if (text.trim() === 'filtered') {
         void this.host?.pushEvent({
           ts: eventTs(this.config.timezone), source: SOURCE, type: 'qqbot.output', origin: 'internal',
@@ -2176,21 +2455,21 @@ export class QQWorld implements World {
         }, {trigger: 'piggyback'}).catch(error => this.log.warn('filtered 发送回执投递失败', {error: String(error)}));
       }
     }
-    const tail = ids.length ? `（message_id: ${ids.join(', ')}，可用 #编号 引用回复）` : '';
+    const tail = ids.length ? `（message_id: ${ids.join(', ')}，仅作发送凭据，不写进正文）` : '';
     if (ok < total) {
-      // 部分/全部失败：返回明确失败标记，便于 qq_send 识别并真实地报告“未发送”（而非误报“已发送”）。
-      return QQWorld.SEND_FAILED + `已向 ${this.convLabel(address)} 发送 ${ok}/${total} 段（有 ${total - ok} 段发送失败，可能因 QQ 协议端断连或图片获取失败）。${tail}`;
+      return (ok > 0 ? QQWorld.SEND_PARTIAL : QQWorld.SEND_FAILED)
+        + `已向 ${this.convLabel(address)} 确认发送 ${ok}/${total} 段，另 ${total - ok} 段未确认成功。${tail}${stickerNote}不要整段重发。`;
     }
-    return `已向 ${this.convLabel(address)} 发送 ${ok}/${total} 段。${tail}${text.trim() === 'filtered' ? '实际发送的正文是 filtered。' : ''}`;
+    return `已向 ${this.convLabel(address)} 发送 ${ok}/${total} 段。${tail}${stickerNote}${voiceFallback}${text.trim() === 'filtered' ? '实际发送的正文是 filtered。' : ''}`;
   }
 
   // ================= 语音通话（模拟）=================
   // OneBot/NapCat 无法真正接听系统级 QQ 电话（无来电事件/接听 API/媒体通道），
   // 这里用“语音消息会话”模拟打电话：触发词接听 → 即时听说（ASR→LLM→TTS）→ 分句流式语音 → 挂断词/超时挂断。
-  // 设计上与传输解耦：本文件是 QQ(OneBot record) 传输适配。
+  // 设计上与传输解耦：本文件是 QQ(OneBot record) 传输适配；桌宠等其它 World 可照搬这套状态机接自己的麦克风/扬声器。
 
   /** 把文本按句末标点切成句子，逐句合成逐句发送，形成流式语音效果。 */
-  private async sendVoiceStreaming(text: string, address: string, replyMessageId?: number, atQQs?: number[], counts = this.privateReplyCounts): Promise<string> {
+  private async sendVoiceStreaming(text: string, address: string, replyMessageId?: number, atQQs?: number[], counts = this.replyCounts(address), beforeSend?: () => boolean): Promise<string> {
     const replyCursor = this.latestReplyCursor(address);
     const [kind, idStr] = address.split(':');
     const id = Number(idStr);
@@ -2228,7 +2507,7 @@ export class QQWorld implements World {
         if (this.host?.isPaused?.()) break;
         const quiet = this.checkQuiet(address);
         if (quiet) return quiet;
-        const r: any = await this.sendMessage(address, { ...paramsBase, message: segs }, counts);
+        const r: any = await this.sendMessage(address, { ...paramsBase, message: segs }, counts, beforeSend);
         if (r?.message_id != null) {
           this.knownMessages.set(String(r.message_id), { conv: address, ts: Date.now() });
           this.scheduleSaveState();
@@ -2551,7 +2830,7 @@ export class QQWorld implements World {
     const tryOnce = async (): Promise<boolean> => {
       try {
         const r = await fetch(`${this.callBridgeBase()}/feed_tts`, {
-          method: 'POST', headers: { 'content-type': 'audio/wav' }, body: buf, signal: AbortSignal.timeout(10000),
+          method: 'POST', headers: { 'content-type': 'audio/wav' }, body: new Uint8Array(buf), signal: AbortSignal.timeout(10000),
         });
         const j = (await r.json().catch(() => null)) as { ok?: boolean; reason?: string } | null;
         if (!j?.ok) this.log.warn('call_bridge feed_tts 失败', { reason: j?.reason });
@@ -2711,6 +2990,7 @@ export class QQWorld implements World {
   }
 
   /** 探测某 host:port 是否已被监听（侧车可能已在运行/被别的进程拉起）。 */
+
   private portInUse(host: string, port: number): Promise<boolean> {
     return new Promise((resolve) => {
       const sock = createConnection({ host, port });
@@ -3060,9 +3340,9 @@ export class QQWorld implements World {
       parameters: {type: 'object', properties: {to: {type: 'string'}, handle: {type: 'string'}}, required: ['to', 'handle'], additionalProperties: false},
       handler: async args => {
         const host = this.host;
-        const counts = this.privateReplyCounts;
         if (!host || host.isPaused?.()) return QQWorld.SEND_BLOCKED + '当前暂停。';
         const address = String(args.to ?? '');
+        const counts = this.replyCounts(address);
         const match = /^(private|group):(\d+)$/u.exec(address);
         if (!match || !this.isListened(match[1] as 'private'|'group', Number(match[2]))) return '[拒绝] 会话不在监听名单';
         const quiet = this.checkQuiet(address); if (quiet) return quiet;
@@ -3096,17 +3376,23 @@ export class QQWorld implements World {
         type: 'object',
         properties: {
           to: { type: 'string', description: '发送目标，原样复制事件 meta 里的 conv 字段。群聊填 "group:<群号>"，私聊填 "private:<QQ号>"。' },
-          text: { type: 'string', description: '要发送的消息正文。可用 #编号 引用回复某条消息。' },
-          reply_message_id: { type: 'number', description: '可选：引用回复的目标消息编号（也可在 text 里写 #编号）。每条收到的消息行首都带有它的 #编号（即该消息在 QQ 上的真实身份），想引用某条消息就填它的编号；必须是同一会话内的消息，否则会被拒绝。' },
+          text: { type: 'string', description: '自然语言正文；日常私聊几个字也能独立成句，用换行分短消息，无需凑成段落。遵守剩余条数，文字、图片、语音共用额度；不重复意思，不用 QQ 原生表情。只发图片时可留空。' },
+          voice: {type:'boolean',description:'true=把 text 合成为 QQ 语音消息；false=发文字；不填则沿用自动语音判断。根据完整对话中的语音请求选择，即使对方最新一句只是“现在可以了吗”。发语音时不附图片，实际发送形式以回执为准。'},
+          images: {type: 'array', maxItems: 9, items: {type: 'string'}, description: '普通图片：实际 http(s) URL、log:/mem: 图片句柄或表情库文件名。与收藏表情包不同；收藏表情用 text 中的 [表情包:真实文件名]。不能编造图片或本机路径。'},
+          reply_message_id: { type: 'integer', description: '群聊确需定位旧消息时才填写；私聊使用普通消息，不引用。编号不能写进 text。' },
           at: { type: 'array', items: { type: 'string' }, description: '可选：要 @ 的人，元素为 QQ 号或群内昵称（如 "123456" 或 "张三"）。发送时会在开头插入 @。' },
         },
-        required: ['to', 'text'],
+        required: ['to'],
       },
       handler: async (args, ctx) => {
         const to = String(args.to ?? '').trim();
         const text = String(args.text ?? '').trim();
         this.log.info('qq_send调用参数', { to, textLength: text.length });
-        if (!text) return 'text 不能为空。';
+        const images = Array.isArray(args.images) ? args.images : [];
+        if (args.voice !== undefined && typeof args.voice !== 'boolean') return '[send blocked] voice 必须是 true 或 false。';
+        if (args.voice === true && images.length) return '[send blocked] 语音请只填写要朗读的正文，图片另发。';
+        if (images.length > 9 || images.some(value => typeof value !== 'string')) return '[send blocked] images 最多 9 个图片地址或句柄。';
+        if (!text && !images.length) return 'text 或 images 至少填写一项。';
         const target = this.resolveTarget(to);
         if (!target) return 'to 格式应为 "group:<群号>" 或 "private:<QQ号>"（直接复制事件 meta 里的 conv 字段，不要自己改）。';
         const address = `${target.kind}:${target.id}`;
@@ -3123,29 +3409,18 @@ export class QQWorld implements World {
           const failed = atRaw.filter((_, i) => resolved[i] == null);
           if (failed.length) this.log.warn('qq_send @ 解析失败（已跳过）', { failed });
         }
-        const rid = this.resolveReplyMessageId(text, args.reply_message_id != null ? Number(args.reply_message_id) : undefined);
+        const rid = target.kind === 'group' && args.reply_message_id != null ? Number(args.reply_message_id) : undefined;
+        if (rid !== undefined && !Number.isSafeInteger(rid)) return '[send blocked] reply_message_id 必须是消息编号整数。';
         if (rid !== undefined && !this.sameConversation(address, rid)) {
           return `[send failed] 引用消息 #${rid} 属于其他会话，不能作为「${this.convLabel(address)}」的引用回复。`;
         }
         const id = `d${Math.random().toString(36).slice(2, 8)}`;
-        this.pendingSends.set(id, { address, label: this.convLabel(address), text, createdAt: Date.now(), replyMessageId: rid, sent: false });
+        this.pendingSends.set(id, { address, label: this.convLabel(address), text, images, voice:args.voice as boolean | undefined, createdAt: Date.now(), replyMessageId: rid, sent: false });
         // 直接发送（去掉强制草稿门：LLM 起草后常常不调 qq_confirm_send，导致消息发不出去）
-        let res = await this.sendTo(address, text, rid, atQQs);
-        // 若因 NapCat 断连/图片失败导致发送失败，等待重连后重试一次（最多约 5s）。
-        if (res.startsWith(QQWorld.SEND_FAILED) && this.driver && !(this.driver as unknown as { connected?: boolean }).connected) {
-          this.log.warn('qq_send 发送失败且 QQ 协议端未连，等待重连后重试', { address });
-          let waited = 0;
-          while (waited < 5000) {
-            await sleep(500);
-            waited += 500;
-            if ((this.driver as unknown as { connected?: boolean }).connected) break;
-          }
-          if ((this.driver as unknown as { connected?: boolean }).connected) {
-            res = await this.sendTo(address, text, rid, atQQs);
-          }
-        }
+        const res = await this.sendTo(address, text, rid, atQQs, this.replyCounts(address), images, undefined, args.voice as boolean | undefined);
         const entry = this.pendingSends.get(id);
         if (entry) entry.sent = !res.startsWith(QQWorld.SEND_BLOCKED) && !res.startsWith(QQWorld.SEND_FAILED);
+        if (res.startsWith(QQWorld.SEND_FAILED)) this.pendingSends.delete(id);
         // 暂停期间已到达的外部事件先排到下一轮
         if (this.host && typeof (this.host as { drainPendingEvents?: unknown }).drainPendingEvents === 'function') {
           const drained = await this.host.drainPendingEvents(
@@ -3156,10 +3431,16 @@ export class QQWorld implements World {
         if (res.startsWith(QQWorld.SEND_BLOCKED)) {
           return `未能发送（编号 ${id}）到 ${this.convLabel(address)}：${res.slice(QQWorld.SEND_BLOCKED.length)}\n${rid !== undefined ? `（引用回复 #${rid} 未发出）\n` : ''}`;
         }
+        if (res.startsWith(QQWorld.SEND_PARTIAL)) {
+          return {
+            text: `部分已发送（编号 ${id}）到 ${this.convLabel(address)}：${res.slice(QQWorld.SEND_PARTIAL.length)}\n（已成功的段落已在 QQ 发出，不要整段重发或重新确认。）`,
+            failed: true,
+          };
+        }
         if (res.startsWith(QQWorld.SEND_FAILED)) {
           // failed:true 让上下文和控制台记录实际失败。
           return {
-            text: `未能发送（编号 ${id}）到 ${this.convLabel(address)}：${res.slice(QQWorld.SEND_FAILED.length)}\n（QQ 上没有收到这条消息。停止重复发送，核对原因；只有连接恢复或参数已纠正的新证据才重试。）`,
+            text: `发送结果未确认（编号 ${id}）到 ${this.convLabel(address)}：${res.slice(QQWorld.SEND_FAILED.length)}\n（不能断言对方未收到；先核对 QQ 历史，不要直接重发。）`,
             failed: true,
           };
         }
@@ -3185,7 +3466,7 @@ export class QQWorld implements World {
         const p = this.pendingSends.get(id)!;
         if (p.sent) return '该草稿已由 qq_send 直接发送，无需重复确认。';
         this.pendingSends.delete(id);
-        return await this.sendTo(p.address, p.text, p.replyMessageId);
+        return await this.sendTo(p.address, p.text, p.replyMessageId, undefined, this.replyCounts(p.address), p.images, undefined, p.voice);
       },
     };
 
@@ -3233,7 +3514,7 @@ export class QQWorld implements World {
       tags: ['read'],
       barrierAfter: true,
       description:
-        '查看已自动收藏的表情包统计：总数、按情感分布、最近若干条（含情感/用处/标签/文件名）。想给 QQ 回复发表情包图片时，先调本工具拿到真实文件名（返回里的 [表情包:xxx.jpg]），再把整段 [表情包:文件名] 写进回复文本即可自动发出；不要编造不存在的文件名。',
+        '查看已自动收藏的表情包统计：总数、按情感分布、最近若干条（含情感/用处/标签/文件名）。想给 QQ 回复发表情包图片时，先调本工具拿到真实文件名（返回里的 [表情包:xxx.jpg]），再把整段 [表情包:文件名] 写进回复文本即可自动发出；只原样复制工具返回的完整标记，不从情绪或标签推导文件名。',
       parameters: {
         type: 'object',
         properties: {
@@ -3247,13 +3528,14 @@ export class QQWorld implements World {
         if (!this.stickers) return '表情包收藏未启用。';
         const limit = typeof args.limit === 'number' && Number.isFinite(args.limit) ? Math.max(1, Math.min(50, args.limit)) : 10;
         const query = typeof args.query === 'string' ? args.query.trim() : '';
-        const s = this.stickers.stats(limit, query);
-        const lines = s.recent.map(
+        const s = this.stickers.stats(this.stickers.size, query);
+        const choices = s.recent.sort((a,b) => Number(b.sources.includes('qq:favorites')) - Number(a.sources.includes('qq:favorites'))).slice(0,limit);
+        const lines = choices.map(
           (m) =>
-            `- [表情包:${m.file}] ${m.label}（情感:${m.emotion} / 用处:${m.usage}${m.tag ? ' / 标签:' + m.tag : ''} / 出现${m.count}次）`,
+            `- [表情包:${m.file}] ${m.label}（来源:${m.sources.includes('qq:favorites') ? 'QQ收藏' : '聊天收藏'} / 情感:${m.emotion} / 用处:${m.usage}${m.tag ? ' / 标签:' + m.tag : ''} / 出现${m.count}次）`,
         );
         const byEmo = Object.entries(s.byEmotion).map(([k, v]) => `${k}:${v}`).join('，') || '无';
-        return `已收藏表情包共 ${s.total} 张；情感分布：${byEmo}\n${query ? '检索结果' : '最近'}：\n${lines.join('\n') || '（暂无匹配；可换关键词或不填 query）'}`;
+        return `已收藏表情包共 ${s.total} 张；情感分布：${byEmo}\n${query ? '检索结果' : '可用表情'}（优先当前账号 QQ 收藏，发送为表情包）：\n${lines.join('\n') || '（暂无匹配；可换关键词或不填 query）'}`;
       },
     };
 
@@ -3297,13 +3579,14 @@ export class QQWorld implements World {
       tags: ['speak'],
       barrierAfter: true,
       description:
-        '在 QQ 空间发一条动态（说说）。受运行暂停、直播屏蔽和作息静默限制；先查 qq_qzone_status，受限时等待，不要反复试发或声称已发。内容按「最近聊天 + 你对人或事的真实看法」自己生成：可省略 content 让它自动按对话与记忆发挥（topic 给方向，如“吐槽最近的天气/介绍某人”）；也可直接给 content 发你写好的。可附图片（images：file://、http(s):// 或 base64:// 链接）与 @人（ats：昵称或 QQ 号）。permission 默认 1=公开。返回 tid 供后续删除/回复。',
+        '发布 QQ 空间动态。先用 qq_qzone_read(view=status) 查询，受限时等待。content 可省略，由当前 Persona 根据真实聊天与记忆生成。附图须传 images 的真实 URL/图片附件句柄/表情库文件名，或正文内放 qq_sticker_stats 返回的 [表情包:真实文件名]；程序会上传图片并移除标记。不能只写图片描述、编造文件名或使用任意本机路径；找不到图片会整条拒发。返回 tid 与提交附图数，不重复发布。',
+
       parameters: {
         type: 'object',
         properties: {
-          content: { type: 'string', description: '动态正文；留空则自动生成（结合最近聊天与记忆，以第一人称发表看法/吐槽/简介）。' },
+          content: { type: 'string', description: '动态正文；留空自动生成。第一人称仅指本账号的自己；先按说话人QQ号和原时间核对谁做了什么，别人说的“我”属于那个人，不能调换自己与操作员的行动。旁观/听说/计划不写成亲历/已完成，未知的细节省略，不公开私聊隐私。' },
           topic: { type: 'string', description: '自动生成时的方向提示，如「吐槽最近的天气」「介绍一下小明」。' },
-          images: { type: 'array', items: { type: 'string' }, description: '附图链接数组（file:// / http(s):// / base64://）。' },
+          images: { type: 'array', maxItems: 9, items: { type: 'string' }, description: '实际 http(s) URL、log:/mem: 图片附件句柄、base64:// 或表情库真实文件名；最多 9 张，禁止 file:// 和任意本机路径。' },
           ats: { type: 'array', items: { type: 'string' }, description: '@的人：昵称或 QQ 号数组。' },
           permission: { type: 'number', description: '可见权限 ugc_right，默认 1=公开。' },
         },
@@ -3319,7 +3602,7 @@ export class QQWorld implements World {
           permission: typeof args.permission === 'number' ? args.permission : undefined,
         });
         return r.ok
-          ? `已发 QQ空间动态。tid=${r.tid ?? '(未知)'}；内容：${r.text ?? ''}`
+          ? `已发 QQ空间动态。tid=${r.tid ?? '(未知)'}；已提交附图 ${r.imageCount ?? 0} 张；内容：${r.text ?? ''}`
           : `发 QQ空间动态失败：${r.error ?? '未知错误'}`;
       },
     };
@@ -3328,7 +3611,7 @@ export class QQWorld implements World {
       name: 'qq_qzone_delete',
       tags: ['speak'],
       barrierAfter: true,
-      description: '删除一条 QQ 空间动态。tid 来自 qq_qzone_post 的返回或 qq_qzone_status 的最近列表。',
+      description: '删除一条 QQ 空间动态。tid 来自 qq_qzone_post 的返回或 qq_qzone_read(view=status) 的最近列表。',
       parameters: {
         type: 'object',
         properties: { tid: { type: 'string', description: '要删除的动态 tid。' } },
@@ -3347,13 +3630,13 @@ export class QQWorld implements World {
       name: 'qq_qzone_reply',
       tags: ['speak'],
       barrierAfter: true,
-      description: '回复某条动态下的一条评论。tid 为动态 id，comment_id 为评论 id（来自 QQ空间评论事件或你记忆里 qq_qzone_status 的互动记录）。',
+      description: '回复某条动态下的一条评论。tid 为动态 id，comment_id 为评论 id（来自 QQ空间评论事件或你记忆里 qq_qzone_read(view=status) 的互动记录）。',
       parameters: {
         type: 'object',
         properties: {
           tid: { type: 'string', description: '动态 tid。' },
           comment_id: { type: 'string', description: '评论 id。' },
-          content: { type: 'string', description: '回复内容。' },
+          content: { type: 'string', description: '回复正文。先按原始说话人和日期核对行动主体，不把自己、评论者或其他人的经历互换；不公开私聊隐私。' },
         },
         required: ['tid', 'comment_id', 'content'],
       },
@@ -3391,13 +3674,13 @@ export class QQWorld implements World {
       name: 'qq_qzone_status',
       tags: ['read'],
       barrierAfter: true,
-      description: '查看 QQ 空间发布限制、今日发布数/配额、自动回评和本地发布记录；本地记录不代表实时空间状态，实时动态请用 qq_qzone_feeds。',
+      description: '查看 QQ 空间发布限制、今日发布数/配额、自动回评和本地发布记录；本地记录不代表实时空间状态，实时动态请用 qq_qzone_read(view=feeds)。',
       parameters: { type: 'object', properties: {}, required: [] },
       handler: async () => {
         if (!this.qzone) return 'QQ空间动态未启用（先在控制台开 worlds.qqbot.qzone.enabled 并重启）。';
         const s = this.qzone.status();
         const posts = (s.lastPosts as Array<{ tid?: string; text: string }>).map((p) => `- tid=${p.tid ?? '?'}：${p.text}`).join('\n') || '（暂无）';
-        return `QQ空间动态：开启=${s.enabled}；当前限制=${s.blockedReason ?? '允许操作'}；今日发布 ${s.dailyCount}/${s.dailyQuota}；自动回评=${s.autoReply}（今日 ${s.replyDailyCount}）；本地发布记录（实时列表请用 qq_qzone_feeds）：\n${posts}`;
+        return `QQ空间动态：开启=${s.enabled}；当前限制=${s.blockedReason ?? '允许操作'}；今日发布 ${s.dailyCount}/${s.dailyQuota}；自动回评=${s.autoReply}（今日 ${s.replyDailyCount}）；本地发布记录（实时列表请用 qq_qzone_read(view=feeds)）：\n${posts}`;
       },
     };
 
@@ -3495,12 +3778,12 @@ export class QQWorld implements World {
       handler: async (args, ctx) => {
         const text = String(args.text ?? '').trim();
         const whenStr = String(args.when ?? '').trim();
-        if (!text) return { error: 'text 不能为空' };
+        if (!text) return toolError('text 不能为空');
         const when = parseWhen(whenStr);
         if (when == null) {
-          return { error: `无法解析时间：“${whenStr}”。支持 ISO、HH:MM、明天 9:00、in 30m、30分钟后 等。` };
+          return toolError(`无法解析时间：“${whenStr}”。支持 ISO、HH:MM、明天 9:00、in 30m、30分钟后 等。`);
         }
-        if (when <= Date.now()) return { error: '这个时间已经过去了，请给一个未来的时间。' };
+        if (when <= Date.now()) return toolError('这个时间已经过去了，请给一个未来的时间。');
         const address = typeof args.address === 'string' && args.address.trim() ? args.address.trim() : ctx.role;
         const scope = typeof args.scope === 'string' ? args.scope.trim() : '';
         const r = this.reminders.add(text, when, { address, scope });
@@ -3526,7 +3809,7 @@ export class QQWorld implements World {
     const reminderCancel: ToolDef = {
       name: 'qq_reminder_cancel',
       tags: ['speak'],
-      description: '取消 / 删除一条提醒（记事）。传要删的 id（来自 qq_reminder_list 或 add 时返回的 id）。',
+      description: '取消 / 删除一条提醒（记事）。传要删的 id（来自 qq_reminder_list 或 qq_reminder_update(action=add) 时返回的 id）。',
       parameters: {
         type: 'object',
         properties: { id: { type: 'string', description: '要取消的提醒 id' } },
@@ -3534,9 +3817,9 @@ export class QQWorld implements World {
       },
       handler: async (args, ctx) => {
         const id = String(args.id ?? '').trim();
-        if (!id) return { error: 'id 不能为空' };
+        if (!id) return toolError('id 不能为空');
         const ok = this.reminders.remove(id);
-        return ok ? { text: `已取消提醒 ${id}。`, ok: true, removed: id } : { error: `没找到 id=${id} 的提醒` };
+        return ok ? { text: `已取消提醒 ${id}。`, ok: true, removed: id } : toolError(`没找到 id=${id} 的提醒`);
       },
     };
     const affinityAdjust: ToolDef = {
@@ -3558,23 +3841,23 @@ export class QQWorld implements World {
       },
       handler: async (args, ctx) => {
         const delta = Number(args.delta);
-        if (!Number.isFinite(delta) || delta === 0) return { error: 'delta 必须是非零数字（正数加、负数减）' };
+        if (!Number.isFinite(delta) || delta === 0) return toolError('delta 必须是非零数字（正数加、负数减）');
         const who = typeof args.who === 'string' ? args.who.trim() : '';
         const addr = ctx.role ?? '';
         const gid = addr.startsWith('group:') ? Number(addr.slice('group:'.length)) : null;
         let key: string | undefined;
         if (who) {
           const ru = await resolveUser(gid ?? 0, who);
-          if (ru.err) return { error: ru.err };
+          if (ru.err) return toolError(ru.err);
           key = String(ru.uid);
         } else if (addr.startsWith('private:')) {
           key = addr.slice('private:'.length);
         } else {
           const fb = this.fallbackTarget(gid);
-          if (!fb) return { error: '群聊里调整好感度需指定 who（昵称/QQ/外号），或 @/引用要操作的人。' };
+          if (!fb) return toolError('群聊里调整好感度需指定 who（昵称/QQ/外号），或 @/引用要操作的人。');
           key = String(fb);
         }
-        if (!key) return { error: '无法确定要对谁调整好感度。' };
+        if (!key) return toolError('无法确定要对谁调整好感度。');
         const reason = typeof args.reason === 'string' ? args.reason.trim() : undefined;
         const before = this.affinity?.get(key)?.score ?? 0;
         const e = this.affinity?.adjust(key, delta, reason) ?? { score: before, name: key, updatedAt: 0 };
@@ -3614,13 +3897,13 @@ export class QQWorld implements World {
         let key: string | undefined;
         if (who) {
           const ru = await resolveUser(gid ?? 0, who);
-          if (ru.err) return { error: ru.err };
+          if (ru.err) return toolError(ru.err);
           key = String(ru.uid);
         } else if (addr.startsWith('private:')) {
           key = addr.slice('private:'.length);
         } else {
           const fb = this.fallbackTarget(gid);
-          if (!fb) return { error: '群聊里查询好感度需指定 who（昵称/QQ/外号），或 @/引用要查询的人。' };
+          if (!fb) return toolError('群聊里查询好感度需指定 who（昵称/QQ/外号），或 @/引用要查询的人。');
           key = String(fb);
         }
         const e = this.affinity?.get(key ?? '');
@@ -3665,8 +3948,8 @@ export class QQWorld implements World {
       handler: async (args, ctx) => {
         const alias = typeof args.alias === 'string' ? args.alias.trim() : '';
         const qqRaw = typeof args.qq === 'string' ? args.qq.trim() : String(args.qq ?? '');
-        if (!alias) return { error: 'alias 不能为空' };
-        if (!/^\d{5,}$/.test(qqRaw)) return { error: 'qq 必须是纯数字 QQ 号（>=5 位）。' };
+        if (!alias) return toolError('alias 不能为空');
+        if (!/^\d{5,}$/.test(qqRaw)) return toolError('qq 必须是纯数字 QQ 号（>=5 位）。');
         const qq = Number(qqRaw);
         this.aliases.set(alias.toLowerCase(), qq);
         this.saveAliases();
@@ -3684,7 +3967,7 @@ export class QQWorld implements World {
       },
       handler: async (args, ctx) => {
         const alias = typeof args.alias === 'string' ? args.alias.trim() : '';
-        if (!alias) return { error: 'alias 不能为空' };
+        if (!alias) return toolError('alias 不能为空');
         const had = this.aliases.delete(alias.toLowerCase());
         if (had) this.saveAliases();
         return had ? { text: `已忘记外号「${alias}」。`, ok: true, alias, forgotten: true } : { text: `没有记过外号「${alias}」。`, ok: true, alias, forgotten: false };
@@ -3717,9 +4000,9 @@ export class QQWorld implements World {
       },
       handler: async (args, ctx) => {
         let text = typeof args.text === 'string' ? args.text.trim() : '';
-        if (!text) return { error: 'text 不能为空' };
+        if (!text) return toolError('text 不能为空');
         try {text = await reviewMemory(this.config.contentReviewUrl, text);}
-        catch {return {error:'记忆内容审核不可用，未保存正文'};}
+        catch {return toolError('记忆内容审核不可用，未保存正文');}
         const r = await this.notebook.save(text);
         const where = r.backend === 'memory' ? '记忆插件(常驻环境提示词)' : '本地笔记本';
         const preview = text.length > 60 ? text.slice(0, 60) + '…' : text;
@@ -3742,11 +4025,11 @@ export class QQWorld implements World {
     const noteGet: ToolDef = {
       name: 'qq_note_get',
       tags: ['read'],
-      description: '按 id 查看某条笔记本内容。id 来自 qq_note_list 的编号/条目 id。',
+      description: '按 id 查看某条笔记本内容。id 来自 qq_note_read(view=list) 的编号/条目 id。',
       parameters: { type: 'object', properties: { id: { type: 'string', description: '条目 id' } }, required: ['id'] },
       handler: async (args, ctx) => {
         const id = typeof args.id === 'string' ? args.id.trim() : '';
-        if (!id) return { error: 'id 不能为空' };
+        if (!id) return toolError('id 不能为空');
         const e = await this.notebook.get(id);
         if (!e) return { text: `没找到 id=${id} 的笔记。`, ok: true, found: false };
         return { text: `笔记 #${id}：${e.text}`, ok: true, found: true, id: e.id, content: e.text, ts: e.ts };
@@ -3755,11 +4038,11 @@ export class QQWorld implements World {
     const noteForget: ToolDef = {
       name: 'qq_note_forget',
       tags: ['write'],
-      description: '删除一条笔记本（你确定不再需要它时）。id 来自 qq_note_list 的编号/条目 id。',
+      description: '删除一条笔记本（你确定不再需要它时）。id 来自 qq_note_read(view=list) 的编号/条目 id。',
       parameters: { type: 'object', properties: { id: { type: 'string', description: '条目 id' } }, required: ['id'] },
       handler: async (args, ctx) => {
         const id = typeof args.id === 'string' ? args.id.trim() : '';
-        if (!id) return { error: 'id 不能为空' };
+        if (!id) return toolError('id 不能为空');
         const ok = await this.notebook.forget(id);
         return ok ? { text: `已删除笔记本 #${id}。`, ok: true, id } : { text: `没找到 id=${id} 的笔记，未删除。`, ok: true, found: false };
       },
@@ -3808,7 +4091,7 @@ export class QQWorld implements World {
       // 2) 群内身份
       if (cfg.allowGroupAdmins) {
         try {
-          const info = await this.driver.getMemberInfo(gid, Number(callerId));
+          const info = await this.driver!.getMemberInfo(gid, Number(callerId));
           const role = (info && (info.role as string)) || 'member';
           const allowed = cfg.ownerOnly ? role === 'owner' : role === 'owner' || role === 'admin';
           if (allowed) return { ok: true, gid, callerId, callerRole: role };
@@ -3821,7 +4104,7 @@ export class QQWorld implements World {
         return { ok: false, text: `群管理员指挥未开启，且你（QQ ${callerStr}）不在授权白名单中，无法命令我执行管理操作。` };
       }
       // 群内身份不足，且无自主授权
-      const info = await this.driver.getMemberInfo(gid, Number(callerId)).catch(() => null);
+      const info = await this.driver!.getMemberInfo(gid, Number(callerId)).catch(() => null);
       const role = (info && (info.role as string)) || 'member';
       return { ok: false, text: `你（QQ ${callerStr}，群内身份=${role}）没有管理员权限，不能命令我执行管理操作。` };
     };
@@ -3834,7 +4117,7 @@ export class QQWorld implements World {
       const cfg = this.config.admin;
       if (!cfg.protectOwner && !cfg.protectAdmins) return null;
       try {
-        const info = await this.driver.getMemberInfo(gid, targetUid);
+        const info = await this.driver!.getMemberInfo(gid, targetUid);
         const role = (info && (info.role as string)) || 'member';
         if (cfg.protectOwner && role === 'owner') return '不能对群主执行该操作（受保护）。';
         if (cfg.protectAdmins && role === 'admin' && callerRole !== 'owner') return '只有群主才能对该管理员执行该操作（受保护）。';
@@ -3870,7 +4153,7 @@ export class QQWorld implements World {
       const driver = this.driver;
       if (!driver) return { ok: false, text: '未连接到 QQ 协议端，无法执行管理员操作。' };
       try {
-        if (this.config.contentReviewUrl) {
+    if (this.config.contentReviewUrl) {
           for (const key of ['content','special_title']) {
             const text = params[key];
             if (typeof text === 'string' && !(await reviewContent(this.config.contentReviewUrl,text,'message')).allow) params[key] = 'filtered';
@@ -3893,12 +4176,12 @@ export class QQWorld implements World {
       parameters: { type: 'object', properties: { messageId: { type: 'string', description: '要撤回的 message_id，可填纯数字或「#123456」形式' }, group: { type: 'string', description: '可选，群号或 group:<群号>；不填则使用当前会话所在群' } }, required: ['messageId'] },
       handler: async (args, ctx) => {
         const auth = await adminAuthorize(ctx, args);
-        if (!auth.ok) return auth.text;
+        if (!auth.ok) return auth.text ?? "管理员授权失败。";
         const raw = typeof args.messageId === 'string' ? args.messageId.replace(/^#/, '').trim() : String(args.messageId ?? '');
         const messageId = Number(raw);
         if (!Number.isFinite(messageId)) return 'messageId 无效（应为数字 message_id，例如消息开头的 #123456）。';
         const res = await api('delete_msg', { message_id: messageId });
-        return res.text;
+        return res.text ?? "协议端没有返回操作结果。";
       },
     };
 
@@ -3910,7 +4193,7 @@ export class QQWorld implements World {
       parameters: { type: 'object', properties: { text: { type: 'string', description: '@全体时附带的正文内容' }, group: { type: 'string', description: '群号或 group:<群号>；不填用当前会话所在群' } }, required: ['text'] },
       handler: async (args, ctx) => {
         const auth = await adminAuthorize(ctx, args);
-        if (!auth.ok) return auth.text;
+        if (!auth.ok) return auth.text ?? "管理员授权失败。";
         let text = typeof args.text === 'string' ? args.text : '';
         const driver = this.driver;
         if (!driver) return '未连接到 QQ 协议端，无法发送。';
@@ -3937,11 +4220,11 @@ export class QQWorld implements World {
       parameters: { type: 'object', properties: { content: { type: 'string', description: '群通知/公告正文' }, group: { type: 'string', description: '群号或 group:<群号>；不填用当前会话所在群' } }, required: ['content'] },
       handler: async (args, ctx) => {
         const auth = await adminAuthorize(ctx, args);
-        if (!auth.ok) return auth.text;
+        if (!auth.ok) return auth.text ?? "管理员授权失败。";
         const content = typeof args.content === 'string' ? args.content : '';
         if (!content.trim()) return '公告内容不能为空。';
         const res = await api(this.config.admin.noticeAction || 'send_group_notice', { group_id: auth.gid!, content });
-        return res.text;
+        return res.text ?? "协议端没有返回操作结果。";
       },
     };
 
@@ -3976,7 +4259,7 @@ export class QQWorld implements World {
         if (!req0) return `没找到 flag=${flag} 的待审请求（可能已处理或已过期）。`;
         const res = await api('set_group_add_request', { flag, sub_type: req0.subType, approve: true });
         if (res.ok) this.pendingJoinRequests.delete(flag);
-        return res.text;
+        return res.text ?? "协议端没有返回操作结果。";
       },
     };
 
@@ -3996,7 +4279,7 @@ export class QQWorld implements World {
         if (!req0) return `没找到 flag=${flag} 的待审请求（可能已处理或已过期）。`;
         const res = await api('set_group_add_request', { flag, sub_type: req0.subType, approve: false, reason: typeof args.reason === 'string' ? args.reason : '' });
         if (res.ok) this.pendingJoinRequests.delete(flag);
-        return res.text;
+        return res.text ?? "协议端没有返回操作结果。";
       },
     };
 
@@ -4008,7 +4291,7 @@ export class QQWorld implements World {
       parameters: { type: 'object', properties: { who: { type: 'string', description: '成员昵称、QQ 号或外号；不填则默认针对最近被引用/@ 提及的人' }, title: { type: 'string', description: '要设置的群头衔（空字符串清除）' }, group: { type: 'string', description: '群号或 group:<群号>；不填用当前会话所在群' } }, required: [] },
       handler: async (args, ctx) => {
         const auth = await adminAuthorize(ctx, args);
-        if (!auth.ok) return auth.text;
+        if (!auth.ok) return auth.text ?? "管理员授权失败。";
         const gid = auth.gid!;
         const whoProvided = typeof args.who === 'string' && args.who.trim();
         const fb = !whoProvided ? this.fallbackTarget(gid) : null;
@@ -4019,7 +4302,7 @@ export class QQWorld implements World {
         if (prot) return prot;
         const title = typeof args.title === 'string' ? args.title : '';
         const res = await api('set_group_special_title', { group_id: gid, user_id: ru.uid, special_title: title });
-        return res.text;
+        return res.text ?? "协议端没有返回操作结果。";
       },
     };
 
@@ -4031,7 +4314,7 @@ export class QQWorld implements World {
       parameters: { type: 'object', properties: { who: { type: 'string', description: '成员昵称、QQ 号或外号；不填则默认针对最近被引用/@ 提及的人' }, durationSec: { type: 'number', description: '禁言时长（秒），默认 600，0=解禁' }, group: { type: 'string', description: '群号或 group:<群号>；不填用当前会话所在群' } }, required: [] },
       handler: async (args, ctx) => {
         const auth = await adminAuthorize(ctx, args);
-        if (!auth.ok) return auth.text;
+        if (!auth.ok) return auth.text ?? "管理员授权失败。";
         const gid = auth.gid!;
         const whoProvided = typeof args.who === 'string' && args.who.trim();
         const fb = !whoProvided ? this.fallbackTarget(gid) : null;
@@ -4042,7 +4325,7 @@ export class QQWorld implements World {
         if (prot) return prot;
         const dur = typeof args.durationSec === 'number' && Number.isFinite(args.durationSec) ? Math.max(0, Math.floor(args.durationSec)) : 600;
         const res = await api('set_group_ban', { group_id: gid, user_id: ru.uid, duration: dur });
-        return res.text;
+        return res.text ?? "协议端没有返回操作结果。";
       },
     };
 
@@ -4054,10 +4337,10 @@ export class QQWorld implements World {
       parameters: { type: 'object', properties: { enable: { type: 'boolean', description: 'true=开启全员禁言，false=关闭' }, group: { type: 'string', description: '群号或 group:<群号>；不填用当前会话所在群' } }, required: ['enable'] },
       handler: async (args, ctx) => {
         const auth = await adminAuthorize(ctx, args);
-        if (!auth.ok) return auth.text;
+        if (!auth.ok) return auth.text ?? "管理员授权失败。";
         const enable = args.enable === true;
         const res = await api('set_group_whole_ban', { group_id: auth.gid!, enable });
-        return res.text;
+        return res.text ?? "协议端没有返回操作结果。";
       },
     };
 
@@ -4124,6 +4407,7 @@ export class QQWorld implements World {
     };
 
     const tools: ToolDef[] = [send, confirm, viewImage, stickerStats, proactiveStatus, proactiveTrigger, qzonePost, qzoneDelete, qzoneReply, qzoneFeeds, qzoneStatus, poke, reminderAdd, reminderList, reminderCancel, affinityAdjust, affinityGet, affinityList, aliasSet, aliasForget, aliasList, noteSave, noteList, noteGet, noteForget, adminRecall, adminAtAll, adminNotice, adminJoinList, adminJoinApprove, adminJoinReject, adminTitle, adminBan, adminBanAll, adminKick, voicecall, ...makeHistoryTools({
+
       getHost: () => this.host,
       sourceId: SOURCE,
       timezone: this.config.timezone,
@@ -4137,7 +4421,13 @@ export class QQWorld implements World {
         tool.description += ' 使用前遵守最新 QQ 发送限制：对应回复开关必须开启，静默时须在独立白名单且有新消息待回复，连接就绪。关闭或被拦截后停止试发，等待状态恢复。';
       }
     }
-    return tools;
+    return compactQQTools(tools);
+  }
+
+  /** 自描述用:用一个未启动的实例读工具表,与 tools() 同源(含动态追加的历史工具)。 */
+  static describeToolSpecs(): ToolSpec[] {
+    // normalizeConfig 已给全默认值,tools() 内部对资源的访问都在 handler 闭包里。
+    return new QQWorld().tools() as ToolSpec[];
   }
 
   // ---- 控制台 ----
@@ -4203,24 +4493,25 @@ export class QQWorld implements World {
       { id: 'call', title: '语音通话', description: '触发词进入语音通话会话（模拟接听）。可整体开关。', group: 'world:qqbot-call', prefix: '', topOnly: false, status: 'getCallState' },
       { id: 'voxcpm', title: 'VoxCPM 侧车', description: 'TTS 侧车子进程（语音合成）。仅当语音引擎选 VoxCPM 时显示，可开关自拉起。', group: 'world:qqbot-voxcpm-sidecar', prefix: '', topOnly: false, status: 'getVoxcpmState' },
     ];
-    // 面板清单按"当前选中的语音引擎"动态决定：VoxCPM 侧车面板只在 TTS 引擎确为 voxcpm 时注册，
-    // 其余引擎（native/custom/local 等）终端用户不看到与本机 VoxCPM 模型无关的侧车界面。
-    const activeModulePanels = modulePanels.filter(
-      (m) => m.id !== 'voxcpm' || this.config.voice.provider === 'voxcpm'
-    );
+    const activeModulePanels = modulePanels;
+    const toPanelDecl = (m: (typeof modulePanels)[number]): WorldPanelDecl => ({
+      id: m.id,
+      title: m.title,
+      description: m.description,
+      getMethods: ['config', ...(m.id === 'general' ? ['restartConnection', 'getReverseToken'] : []), ...(m.status ? [m.status] : []), ...(m.extra === 'asr' ? ['downloadAsrModel'] : [])],
+    });
+    // 面板顺序：连接与监听排第一（装完扩展第一件事就是配连接与监听），监听名单排第二，
+    // 其余模块与「实时事件」保持原有相对顺序。
     const panels: WorldPanelDecl[] = [
+      ...activeModulePanels.filter((m) => m.id === 'general').map(toPanelDecl),
       { id: 'roster', title: '监听名单', description: '当前监听的群与私聊及未读情况。', getMethods: ['getRoster'] },
+      ...activeModulePanels.filter((m) => m.id !== 'general').map(toPanelDecl),
       { id: 'events', title: '实时事件', description: 'QQ 消息与通知的实时流。' },
-      ...activeModulePanels.map((m) => ({
-        id: m.id,
-        title: m.title,
-        description: m.description,
-        getMethods: ['config', ...(m.status ? [m.status] : []), ...(m.extra === 'asr' ? ['downloadAsrModel'] : [])],
-      })),
     ];
     return {
       label: 'QQ ProMAX',
       lamps,
+
       badges: [
         { label: '自身 QQ', value: this.identity?.selfId ?? '-', tone: 'on' },
         { label: '监听会话', value: this.convs.size, tone: 'on' },
@@ -4265,6 +4556,7 @@ export class QQWorld implements World {
         },
       ],
       config: [QQ_QUIET_GROUP, QQ_CONFIG_GROUP, QQ_VOICE_GROUP, QQ_ASR_GROUP, QQ_CALL_GROUP, QQ_VOXCPM_SIDECAR_GROUP],
+
     };
   }
 
@@ -4488,6 +4780,10 @@ export class QQWorld implements World {
     if (panel === 'sticker' && method === 'getStickerState') {
       return { syncing: this.stickerSync !== null, result: this.stickerSyncResult, ...this.stickers?.stats(10) };
     }
+    if (method === 'restartConnection') return this.restartConnection();
+    // 反向连接自动生成的 token 要展示给用户（他得拿去填 NapCat），仅回显当前生效值。
+    if (method === 'getReverseToken') return this.reverseTokenForPanel;
+
     if (panel === 'roster' && method === 'getRoster') {
       const list = [...this.convs.values()].map((c) => ({
         address: c.address,
@@ -4518,7 +4814,7 @@ export class QQWorld implements World {
       const topOnly = args[2] === true;
       return this.getConfigSchema(groupId, prefix, topOnly);
     }
-    return { error: 'unknown method' };
+    return toolError('unknown method');
   }
 
   private stream(panel: string, socket: WorldStreamSocket): void {
@@ -4528,7 +4824,7 @@ export class QQWorld implements World {
     }
     this.eventSockets.add(socket);
     socket.onClose(() => this.eventSockets.delete(socket));
-    // 回放最近 20 条 QQ 事件。
+    // 先回放最近 20 条
     if (this.host) {
       const qq = this.host.store.range({ source: SOURCE, limit: 20 });
       const recent = qq.sort((a, b) => a.cursor - b.cursor).reverse().slice(0, 20);
@@ -4553,7 +4849,7 @@ export class QQWorld implements World {
     const nowStr = this.nowText();
     const festivalLine = this.festivalLine();
     const qzoneLine = this.qzone
-      ? `当前QQ空间限制：${this.qzoneBlockedReason() ?? '允许操作'}。受限时不要调用发布/删除/回评，读取列表和状态仍可用。` + '已开启 QQ 空间动态能力：你可以用 qq_qzone_post 以第一人称发一条动态（说说），按最近聊天与记忆发表对某人/某事的真实看法、吐槽、安利或简介，可附图与 @人；qq_qzone_delete 删除动态；qq_qzone_reply 回复评论；qq_qzone_status 看状态。也可以在对话里自然地说「帮我发条空间动态说说今天…」来触发。'
+      ? `当前QQ空间限制：${this.qzoneBlockedReason() ?? '允许操作'}。受限时不要调用发布/删除/回评，读取列表和状态仍可用。` + '已开启 QQ 空间动态能力：你可以用 qq_qzone_post 以第一人称发一条动态（说说），按最近聊天与记忆发表对某人/某事的真实看法、吐槽、安利或简介，可附图与 @人；qq_qzone_delete 删除动态；qq_qzone_reply 回复评论；qq_qzone_read(view=status) 看状态。也可以在对话里自然地说「帮我发条空间动态说说今天…」来触发。'
       : 'QQ 空间动态未开启（如需请在控制台开 worlds.qqbot.qzone.enabled 并重启）。';
     const gs = this.config.groupSpeak;
     const groupSpeakLine = gs.enabled
@@ -4564,17 +4860,17 @@ export class QQWorld implements World {
       ? `话题防死循环已开启：同一会话里你连续发言达到 ${al.maxConsecutiveBotTurns} 条（对方发来任意消息即清零），或对方静默超过 ${al.idleToEndSec}s 且你已经发过言，下一次发言会被自动拦截并提示「话题自动收尾」。请主动把握分寸：对方不接话、只回敷衍或已明显不想聊时，就该停，不要硬聊、不要反复抛同一话题制造死循环。`
       : '话题防死循环未开启。';
     const affinityLine = this.affinity && this.config.affinity.enabled
-      ? '好感度（关系分）系统已开启：你对每个用户有一份独立的好感度，范围 -100~100，初始 0=普通，会随互动上下浮动（不是只增不减——让人舒服就加、让人反感/越界就减）。相关工具：qq_affinity_adjust 调整、qq_affinity_get 查询、qq_affinity_list 总览。你与该用户对话时，其当前好感度会自动作为「关系备忘」注入上下文，你要据此自然把握态度与分寸（高好感更亲昵放松，低/负好感更客气疏远、保持距离），但不要生硬念数字、不要刻意强调关系分。'
+      ? '好感度（关系分）系统已开启：你对每个用户有一份独立的好感度，范围 -100~100，初始 0=普通，会随互动上下浮动（不是只增不减——让人舒服就加、让人反感/越界就减）。相关工具：qq_affinity_adjust 调整、qq_affinity_read(view=person) 查询、qq_affinity_read(view=ranking) 总览。你与该用户对话时，其当前好感度会自动作为「关系备忘」注入上下文，你要据此自然把握态度与分寸（高好感更亲昵放松，低/负好感更客气疏远、保持距离），但不要生硬念数字、不要刻意强调关系分。'
       : '好感度系统未开启（开启后会对每位用户维护一份可正可负、随互动浮动的好感度，并注入当前对话上下文）。';
     const voice = this.config.voice;
     const voiceLine = voice?.enabled && voice?.tts
-      ? '语音能力已开启：当对方明确要求语音（如「发条语音」「念一段」）时，你的回复会被系统转成一条语音消息发送（而非纯文字），语音里说的就是你写的那些话。你发出的语音就是你自己说的，务必记住那是你发的——不要把它误认成对方发来的消息，也不要因此以为自己没发出去。其余情况仍以文字发送。'
+      ? 'QQ 语音能力已开启：对方要求语音时，用 qq_send(to, text, voice=true) 将正文合成为 QQ 语音消息；根据完整对话判断，后续“现在可以了吗”等接话不取消此前的语音请求。voice=false 明确发文字，不填沿用自动判断。语音与文字共用回复额度，仍须通过审核和发送权限检查。以回执确认实际发送了语音；若回退文字，不说成语音已发出。自己的语音不要误认为对方的消息。'
       : '语音能力未开启（开启后对方要求语音时你会以语音消息回复）。';
     return {
       'qq.self': self,
       'qq.activeGroups': groupLines,
       'qq.activePrivates': privLines,
-      'qq.unread': this.unreadSummary(),
+      'qq.unread': [this.unreadSummary(),this.replyProgress()].filter(Boolean).join('\n'),
       'qq.now': `当前时间：${nowStr}（时区 ${this.config.timezone}）。若用户问「现在几点」「今天星期几」「几号了」等，据此回答，不要乱编。`,
       'qq.festival': festivalLine,
       'qq.qzone': qzoneLine,

@@ -1,8 +1,54 @@
 import { nowIso, shortTime } from 'cortico/core/util.ts';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, realpathSync, statSync } from 'node:fs';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { faceName, faceIdByName } from './qface-map.ts';
 import type { OneBotSegment } from './types.ts';
+
+/**
+ * 把「表情包:文件名」解析成表情包目录内的绝对路径，越界一律拒绝。
+ *
+ * 这个标记的文本来自**入站消息**，也就是群友可控内容。若直接 `join(emojiDir, fname)`，
+ * `..\..\` 能一路逃出表情包目录，指向本机任意文件，再作为图片发出去——等于把
+ * 「读取任意文件并外传」的能力交给任何能发言的人。这里做三重收敛：
+ *   1. 拒绝绝对路径与含 `..` 的名字；
+ *   2. 解析后必须仍落在 emojiDir 之内（含符号链接指向的真实路径再验一次）；
+ *   3. 必须是普通文件。
+ * 任何一条不满足返回 null，由发送入口拒绝该次发送。
+ */
+export function resolveEmojiFile(emojiDir: string, fname: string): string | null {
+  try {
+    if (!fname || fname.length > 200) return null;
+    if (isAbsolute(fname) || /^[a-zA-Z]:/.test(fname) || fname.includes('\0')) return null;
+    // 归一化各平台分隔符后，任何 `..` 片段都直接拒绝
+    const unified = fname.replace(/\//g, sep);
+    if (unified.split(sep).some((seg) => seg === '..')) return null;
+
+    const base = resolve(emojiDir);
+    const target = resolve(base, unified);
+    const rel = relative(base, target);
+    if (!rel || rel.startsWith('..') || isAbsolute(rel)) return null;
+
+    // 符号链接再验一次真实路径，防止「目录内软链指向目录外」
+    let realBase = base;
+    let realTarget = target;
+    try {
+      realBase = realpathSync(base);
+      realTarget = realpathSync(target);
+    } catch {
+      return null; // 目录或文件不存在
+    }
+    const realRel = relative(realBase, realTarget);
+    if (!realRel || realRel.startsWith('..') || isAbsolute(realRel)) return null;
+    if (!statSync(realTarget).isFile()) return null;
+
+    return target;
+  } catch {
+    return null;
+  }
+}
+
+// 仅供测试断言路径收敛用（命名空间导出不进入运行时契约）。
+export const __resolveEmojiFileForTest = resolveEmojiFile;
 
 /** 把 OneBot 消息段数组渲染为对模型友好的纯文本（含引用/表情/@ 标注）。 */
 export function renderIncoming(
@@ -54,7 +100,7 @@ export function renderIncoming(
   return out.join('').trim();
 }
 
-function formatMention(qq: string, name: string | undefined, selfId: number): string {
+function formatMention(qq: string | number, name: string | undefined, selfId: number): string {
   const id = Number(qq);
   if (id === selfId) return '@我';
   return name ? `@${name}` : `@${qq}`;
@@ -90,39 +136,29 @@ export function renderSegmentsPlain(segments: OneBotSegment[] | string | undefin
     .join('');
 }
 
-/**
- * 把待发送文本构建为 OneBot 发送段（对齐 fat-fish parse_reply_segments）：
- *   - [表情包:文件名] → image 段（本地文件，位于 emojiDir 下；文件缺失则丢弃，不报错）
- *   - [表情N] / [表情N:名称] → face 段
- *   - [中文表情名]（命中映射，如 [旺柴]/[笑哭]）→ face 段
- *   - @名字 / @QQ号 → at 段
- *   - 其它 [..] → 普通文本（保留方括号原样）
- * emojiDir 为空时不解析表情包标记。
- */
-export function buildOutgoing(text: string, emojiDir = ''): OneBotSegment[] {
+/** 聊天可回报并跳过缺失的装饰表情；发布动态仍要求所有附图有效。 */
+export function buildOutgoing(text: string, emojiDir = '', onMissingSticker?: (marker: string) => void): OneBotSegment[] {
   const segments: OneBotSegment[] = [];
-  const re = /\[([^\[\]]{1,40})\]|@([^\s@]{1,30})/g;
+  const re = /[\[［]([^\[\]［］]{1,240})[\]］]|@([^\s@]{1,30})/g;
   let last = 0;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) {
     if (m.index > last) segments.push({ type: 'text', data: { text: text.slice(last, m.index) } });
     if (m[1] !== undefined) {
-      const inner = m[1];
+      const inner = m[1].trim();
       const whole = m[0];
-      if (inner.startsWith('表情包:')) {
-        const fname = inner.slice('表情包:'.length).trim();
-        if (emojiDir && fname) {
-          const p = join(emojiDir, fname);
-          if (existsSync(p)) segments.push({ type: 'image', data: { file: p } });
-        }
-        // 目录未配置或文件缺失：丢弃该标记
+      if (inner.startsWith('表情包')) {
+        const fname = inner.replace(/^表情包\s*[:：]?\s*/, '').trim();
+        const p = emojiDir && resolveEmojiFile(emojiDir, fname);
+        if (!p || !existsSync(p) || !/\.(png|jpe?g|gif|webp)$/i.test(p)) {
+          if (!onMissingSticker) throw new Error('表情包不存在或不可访问；先用 qq_sticker_stats 获取真实文件名，本次未发送。');
+          onMissingSticker(whole);
+        } else segments.push({ type: 'image', data: { file: p, sub_type: 1 } });
       } else if (/^表情\s*\d+(?:[:：][^\]]*)?$/.test(inner)) {
-        const id = inner.match(/^表情\s*(\d+)/)![1];
-        segments.push({ type: 'face', data: { id: Number(id) } });
+        // QQ 原生表情不属于允许的发送方式。
       } else {
         const fid = faceIdByName(inner);
-        if (fid !== null) segments.push({ type: 'face', data: { id: fid } });
-        else segments.push({ type: 'text', data: { text: whole } });
+        if (fid === null) segments.push({ type: 'text', data: { text: whole } });
       }
     } else if (m[2] !== undefined) {
       segments.push({ type: 'at', data: { qq: m[2], name: /^(\d{5,})$/.test(m[2]) ? undefined : m[2] } });
@@ -130,7 +166,9 @@ export function buildOutgoing(text: string, emojiDir = ''): OneBotSegment[] {
     last = re.lastIndex;
   }
   if (last < text.length) segments.push({ type: 'text', data: { text: text.slice(last) } });
-  if (segments.length === 0) segments.push({ type: 'text', data: { text } });
+  if (segments.some(segment => segment.type === 'text' && /[\[［]\s*表情包/.test(segment.data.text))) {
+    throw new Error('表情包标记不完整；请使用 qq_sticker_stats 返回的完整标记，本次未发送。');
+  }
   return segments;
 }
 
@@ -162,9 +200,9 @@ export function splitReplyIntoMessages(segments: OneBotSegment[], opts: SplitRep
         .filter((s) => s.type === 'text')
         .map((s) => (s.data as { text?: string }).text ?? '')
         .join('');
-      const faces = textParts.filter((s) => s.type === 'face');
+      const attachments = textParts.filter((s) => s.type !== 'text');
       const sentences = fullText
-        .split(/(?<=[。！？!?；;])/)
+        .split(/(?<=[。！？!?；;])|\r?\n+/)
         .map((s) => s.trim())
         .filter(Boolean);
       if (sentences.length <= 1) {
@@ -180,7 +218,7 @@ export function splitReplyIntoMessages(segments: OneBotSegment[], opts: SplitRep
             groups.push([{ type: 'text', data: { text: chunk } }]);
           }
         }
-        if (faces.length && groups.length) groups[groups.length - 1].push(...faces);
+        if (attachments.length && groups.length) groups[groups.length - 1].push(...attachments);
       }
     }
   }

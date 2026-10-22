@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, extname } from 'node:path';
 import type { Logger } from 'cortico/core/types.ts';
-import { prepareImageRequest } from './image-requests.ts';
+const prepareImageRequest = async (body: Record<string, unknown>, signal?: AbortSignal) => { signal?.throwIfAborted(); return body; };
 
 /** 单张表情包的元数据（按内容 sha256 去重）。 */
 export interface StickerMeta {

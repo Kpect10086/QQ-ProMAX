@@ -1,4 +1,5 @@
 // src/console/client.ts
+var TUTORIAL_URL = "https://github.com/hth768/cortico-world-qq-final/blob/main/docs/guide.md";
 var MODULES = [
   { id: "quiet", title: "\u9759\u9ED8\u767D\u540D\u5355", desc: "\u4F5C\u606F\u7761\u7720\u548C\u5348\u4F11\u671F\u95F4\u505C\u6B62\u4E3B\u52A8\u53D1\u9001\uFF0C\u53EA\u56DE\u590D\u72EC\u7ACB\u7684\u7FA4\u804A\u6216\u79C1\u804A\u540D\u5355\u3002", group: "world:qqbot-quiet", prefix: "", topOnly: false, status: "getQuietState" },
   { id: "general", title: "\u8FDE\u63A5\u4E0E\u76D1\u542C", desc: "OneBot \u8FDE\u63A5\u53C2\u6570\u4E0E\u76D1\u542C\u540D\u5355\uFF1B\u8FDE\u63A5\u7C7B\u6539\u52A8\u9700\u91CD\u542F\u751F\u6548\u3002", group: "world:qqbot", prefix: "", topOnly: true },
@@ -58,17 +59,33 @@ function renderField(ctx, def, value, commit) {
       onChange: (v2) => commit(v2)
     });
   } else if (def.type === "integer" || def.type === "number") {
+    const num = (v) => def.type === "integer" ? parseInt(v || "0", 10) : parseFloat(v || "0");
     control = ui.input({
       value: value == null ? "" : String(value),
       type: "number",
-      onChange: (v) => commit(def.type === "integer" ? parseInt(v || "0", 10) : parseFloat(v || "0"))
+      onChange: (v) => commit(num(v)),
+      onCommit: (v) => commit(num(v))
     });
   } else if (isLongText(def.key, def)) {
-    control = ui.textarea({ value: value == null ? "" : String(value), rows: 4, onChange: (v) => commit(v) });
+    control = ui.textarea({
+      value: value == null ? "" : String(value),
+      rows: 4,
+      onChange: (v) => commit(v),
+      onCommit: (v) => commit(v)
+    });
   } else if (/secret|key/i.test(def.key) || /key|密钥|token/i.test(def.title)) {
-    control = ui.input({ value: value == null ? "" : String(value), type: "password", onChange: (v) => commit(v) });
+    control = ui.input({
+      value: value == null ? "" : String(value),
+      type: "password",
+      onChange: (v) => commit(v),
+      onCommit: (v) => commit(v)
+    });
   } else {
-    control = ui.input({ value: value == null ? "" : String(value), onChange: (v) => commit(v) });
+    control = ui.input({
+      value: value == null ? "" : String(value),
+      onChange: (v) => commit(v),
+      onCommit: (v) => commit(v)
+    });
   }
   wrap.appendChild(control);
   if (def.description) {
@@ -157,6 +174,62 @@ function makePanel(m) {
           }
         );
       }
+      if (m.id === "general") {
+        const bar = ui.rowbar();
+        const link = document.createElement("a");
+        link.href = TUTORIAL_URL;
+        link.target = "_blank";
+        link.rel = "noreferrer noopener";
+        link.textContent = "\u{1F4D8} \u4F7F\u7528\u6559\u7A0B";
+        link.style.fontSize = "13px";
+        link.style.textDecoration = "none";
+        link.style.color = "var(--accent, #16a34a)";
+        link.title = "\u65B0\u7A97\u53E3\u6253\u5F00\u63A5\u5165\u6559\u7A0B";
+        bar.appendChild(link);
+        const restart = ui.button("\u91CD\u542F\u8FDE\u63A5", {
+          size: "sm",
+          onClick: () => {
+            restart.disabled = true;
+            restart.textContent = "\u91CD\u542F\u4E2D\u2026";
+            void ctx.invoke("restartConnection", []).then(
+              (r) => {
+                const res = r;
+                const msg = res?.message ?? (res?.ok ? "\u5DF2\u91CD\u542F\u8FDE\u63A5\u3002" : "\u91CD\u542F\u5931\u8D25\u3002");
+                toast(msg);
+                if (res?.target) restart.textContent = `\u5DF2\u91CD\u542F \xB7 ${res.target}`;
+              },
+              (e) => {
+                toast("\u91CD\u542F\u5931\u8D25\uFF1A" + (e instanceof Error ? e.message : String(e)));
+              }
+            ).finally(() => {
+              restart.disabled = false;
+              setTimeout(() => {
+                restart.textContent = "\u91CD\u542F\u8FDE\u63A5";
+              }, 4e3);
+            });
+          }
+        });
+        bar.appendChild(restart);
+        if (m.id === "general") {
+          void ctx.invoke("getReverseToken", []).then((r) => {
+            const t = typeof r === "string" ? r : "";
+            if (!t) return;
+            const box = document.createElement("div");
+            box.className = "msgline";
+            box.style.cssText = "margin-top:8px;font-size:12px";
+            box.textContent = `\u53CD\u5411\u8FDE\u63A5 Token\uFF08\u81EA\u52A8\u751F\u6210\uFF0C\u5DF2\u4FDD\u5B58\u5230 dataDir/reverse-token.txt\uFF09\uFF1A${t} \u2014 \u8BF7\u5728 NapCat\u300C\u8BBE\u7F6E\u53CD\u5411\u5BA2\u6237\u7AEF\u300D\u7684 Token \u91CC\u586B\u540C\u4E00\u4E32\uFF0C\u5426\u5219\u8FDE\u4E0D\u4E0A\u3002`;
+            bar.parentElement?.insertBefore(box, bar.nextSibling);
+          }, () => {
+          });
+        }
+        sheet.body.appendChild(bar);
+        const tip = document.createElement("div");
+        tip.style.fontSize = "12px";
+        tip.style.opacity = "0.7";
+        tip.style.margin = "0 0 10px";
+        tip.innerHTML = "\u9ED8\u8BA4\u662F<b>\u53CD\u5411\u8FDE\u63A5</b>\uFF1A\u684C\u5BA0\u5F00\u76D1\u542C\u3001NapCat \u4E3B\u52A8\u8FDE\u5165\uFF0C\u6B64\u65F6 <b>OneBot Token \u7559\u7A7A</b>\u5373\u53EF\u3002\u53EA\u6709\u6539\u6210\u300C\u6B63\u5411\u8FDE\u63A5\u300D\u65F6\u624D\u9700\u8981\u586B Token\uFF08\u586B NapCat \u91CC<b>\u6B63\u5411 WS \u670D\u52A1\u5668</b>\u90A3\u4E2A\uFF09\u3002";
+        sheet.body.appendChild(tip);
+      }
       if (m.extra === "asr") {
         const dl = ui.button("\u4E0B\u8F7D/\u6821\u9A8C ASR \u6A21\u578B", {
           onClick: () => {
@@ -210,30 +283,117 @@ function sectionEl(title, items) {
   }
   return wrap;
 }
+var ROSTER_KEYS = {
+  groups: "worlds.qqbot.groups",
+  privates: "worlds.qqbot.privates"
+};
+var ROSTER_LABELS = { groups: "\u76D1\u542C\u7FA4", privates: "\u76D1\u542C\u79C1\u804A" };
 var rosterPanel = {
   mount(ctx) {
     const ui = ctx.ui;
-    const sheet = ui.sheet({ title: "\u76D1\u542C\u540D\u5355", desc: "\u5F53\u524D\u76D1\u542C\u7684\u7FA4\u4E0E\u79C1\u804A\u53CA\u672A\u8BFB\u60C5\u51B5\u3002" });
-    sheet.body.textContent = "\u52A0\u8F7D\u76D1\u542C\u540D\u5355\u2026";
+    const sheet = ui.sheet({ title: "\u76D1\u542C\u540D\u5355", desc: "\u5F53\u524D\u76D1\u542C\u7684\u7FA4\u4E0E\u79C1\u804A\uFF1B\u4E0B\u65B9\u53EF\u76F4\u63A5\u7F16\u8F91\uFF0C\u4FDD\u5B58\u5373\u65F6\u751F\u6548\uFF08\u65E0\u9700\u91CD\u542F\uFF09\u3002" });
+    const status = ui.msgline("\u52A0\u8F7D\u76D1\u542C\u540D\u5355\u2026");
+    sheet.body.appendChild(status);
+    const formHost = document.createElement("div");
+    sheet.body.appendChild(formHost);
     ctx.root.appendChild(sheet.el);
-    void ctx.invoke("getRoster").then(
-      (r) => {
-        const data = r;
-        sheet.body.replaceChildren();
-        const info = document.createElement("div");
-        info.style.fontSize = "12px";
-        info.style.opacity = "0.7";
-        info.style.marginBottom = "8px";
-        info.textContent = `selfId: ${data.selfId ?? "\u2014"}  mode: ${data.mode ?? "\u2014"}  \u7FA4\u6570: ${(data.groups || []).length}  \u79C1\u804A\u6570: ${(data.privates || []).length}`;
-        sheet.body.appendChild(info);
-        sheet.body.appendChild(sectionEl("\u76D1\u542C\u7FA4", (data.groups || []).map((g) => String(g))));
-        sheet.body.appendChild(sectionEl("\u76D1\u542C\u79C1\u804A", (data.privates || []).map((p) => String(p))));
-        sheet.body.appendChild(sectionEl("\u6D3B\u8DC3\u4F1A\u8BDD", (data.convs || []).map((c) => `${c.label || c.address} [${c.kind || "?"}]${c.active ? " \u2022\u5728\u7EBF" : ""} \u6210\u5458:${c.members ?? 0}`)));
-      },
-      (e) => {
-        sheet.body.textContent = "\u76D1\u542C\u540D\u5355\u8BFB\u53D6\u5931\u8D25\uFF1A" + (e instanceof Error ? e.message : String(e));
-      }
-    );
+    const errText = (e) => e instanceof Error ? e.message : String(e);
+    const build = (data) => {
+      formHost.replaceChildren();
+      const groupsVal = (data.groups || []).join(" ");
+      const privatesVal = (data.privates || []).join(" ");
+      const info = document.createElement("div");
+      info.style.fontSize = "12px";
+      info.style.opacity = "0.7";
+      info.style.marginBottom = "8px";
+      info.textContent = `selfId: ${data.selfId ?? "\u2014"}  mode: ${data.mode ?? "\u2014"}  \u7FA4\u6570: ${(data.groups || []).length}  \u79C1\u804A\u6570: ${(data.privates || []).length}`;
+      const saveField = async (which, raw) => {
+        status.textContent = `\u6B63\u5728\u4FDD\u5B58${ROSTER_LABELS[which]}\u2026`;
+        try {
+          await ctx.setConfig("world:qqbot", { [ROSTER_KEYS[which]]: raw.trim() });
+          status.textContent = `${ROSTER_LABELS[which]}\u5DF2\u4FDD\u5B58 \u2713 \u5373\u65F6\u751F\u6548\uFF08\u65E0\u9700\u91CD\u542F\uFF09`;
+        } catch (e) {
+          status.textContent = `${ROSTER_LABELS[which]}\u4FDD\u5B58\u5931\u8D25\uFF1A${errText(e)}`;
+          status.classList.add("bad");
+          return;
+        }
+        status.classList.remove("bad");
+        try {
+          const r = await ctx.invoke("getRoster");
+          info.textContent = `selfId: ${r.selfId ?? "\u2014"}  mode: ${r.mode ?? "\u2014"}  \u7FA4\u6570: ${(r.groups || []).length}  \u79C1\u804A\u6570: ${(r.privates || []).length}`;
+        } catch {
+        }
+      };
+      const commitGroups = (v) => {
+        void saveField("groups", v);
+      };
+      const commitPrivates = (v) => {
+        void saveField("privates", v);
+      };
+      const groupsInput = ui.textarea({
+        value: groupsVal,
+        rows: 3,
+        placeholder: "\u76D1\u542C\u7684\u7FA4\u53F7\uFF0C\u7528\u7A7A\u683C\u6216\u9017\u53F7\u5206\u9694\uFF1B\u7559\u7A7A=\u5168\u90E8\u7FA4",
+        onChange: commitGroups,
+        onCommit: commitGroups
+      });
+      const privatesInput = ui.textarea({
+        value: privatesVal,
+        rows: 3,
+        placeholder: "\u76D1\u542C\u7684\u79C1\u804A QQ \u53F7\uFF0C\u7528\u7A7A\u683C\u6216\u9017\u53F7\u5206\u9694\uFF1B\u7559\u7A7A=\u4E0D\u76D1\u542C\u79C1\u804A",
+        onChange: commitPrivates,
+        onCommit: commitPrivates
+      });
+      const groupWrap = document.createElement("div");
+      groupWrap.style.margin = "10px 0";
+      const gl = document.createElement("div");
+      gl.style.fontWeight = "600";
+      gl.style.marginBottom = "3px";
+      gl.textContent = "\u76D1\u542C\u7FA4\uFF08\u7A7A\u683C/\u9017\u53F7\u5206\u9694\uFF09";
+      groupWrap.append(gl, groupsInput);
+      const privWrap = document.createElement("div");
+      privWrap.style.margin = "10px 0";
+      const pl = document.createElement("div");
+      pl.style.fontWeight = "600";
+      pl.style.marginBottom = "3px";
+      pl.textContent = "\u76D1\u542C\u79C1\u804A\uFF08\u7A7A\u683C/\u9017\u53F7\u5206\u9694\uFF09";
+      privWrap.append(pl, privatesInput);
+      const saveAll = ui.button("\u4FDD\u5B58\u4E24\u4E2A\u540D\u5355", {
+        onClick: () => {
+          status.textContent = "\u6B63\u5728\u4FDD\u5B58\u2026";
+          void ctx.setConfig("world:qqbot", {
+            [ROSTER_KEYS.groups]: groupsInput.value.trim(),
+            [ROSTER_KEYS.privates]: privatesInput.value.trim()
+          }).then(
+            () => {
+              status.textContent = "\u76D1\u542C\u7FA4\u4E0E\u76D1\u542C\u79C1\u804A\u5DF2\u4FDD\u5B58 \u2713 \u5373\u65F6\u751F\u6548";
+              status.classList.remove("bad");
+            },
+            (e) => {
+              status.textContent = "\u4FDD\u5B58\u5931\u8D25\uFF1A" + errText(e);
+              status.classList.add("bad");
+            }
+          );
+        }
+      });
+      formHost.append(info, groupWrap, privWrap, saveAll);
+      formHost.appendChild(sectionEl("\u6D3B\u8DC3\u4F1A\u8BDD", (data.convs || []).map((c) => `${c.label || c.address} [${c.kind || "?"}]${c.active ? " \u2022\u5728\u7EBF" : ""} \u6210\u5458:${c.members ?? 0}`)));
+    };
+    const load = () => {
+      status.textContent = "\u52A0\u8F7D\u76D1\u542C\u540D\u5355\u2026";
+      status.classList.remove("bad");
+      return ctx.invoke("getRoster").then(
+        (r) => {
+          status.textContent = "\u7F16\u8F91\u540E\u5931\u7126\u6216\u6309 Ctrl/\u2318+Enter \u5373\u81EA\u52A8\u4FDD\u5B58\u3002";
+          build(r);
+        },
+        (e) => {
+          status.textContent = "\u76D1\u542C\u540D\u5355\u8BFB\u53D6\u5931\u8D25\uFF1A" + errText(e);
+          status.classList.add("bad");
+        }
+      );
+    };
+    void load();
   }
 };
 var eventsPanel = {

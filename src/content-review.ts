@@ -14,13 +14,14 @@ export async function reviewContent(url: string, text: string, purpose: ReviewPu
   } catch { return {allow: false, reason: 'unavailable'}; }
 }
 
-export async function reviewMemory(url: string, text: string, purpose: 'memory'|'received' = 'memory'): Promise<string> {
+export async function reviewMemory(url: string, text: string, purpose: 'memory'|'received' = 'memory', onRejected?: () => void): Promise<string> {
   if (!url || !text.trim()) return text;
   const safe: string[] = [];
   // shortcut: long records are reviewed in bounded chunks; use contextual chunking if records span chunk boundaries.
   for (let offset = 0; offset < text.length; offset += 5000) {
     const part = text.slice(offset, offset + 5000);
     const result = await reviewContent(url, part, purpose);
+    if (!result.allow) onRejected?.();
     if (result.allow) safe.push(part);
     else if (result.sanitizedText) safe.push(result.sanitizedText);
     else throw new Error('Memory content review unavailable');

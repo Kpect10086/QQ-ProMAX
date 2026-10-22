@@ -1,14 +1,16 @@
 /** OneBot v11 数据模型（本扩展自包含，不依赖 core 内部模块）。 */
+import type { BlobInput } from 'cortico/core/types.ts';
 
 export type OneBotSegment =
   | { type: 'text'; data: { text: string } }
   | { type: 'at'; data: { qq: number | string; name?: string } }
   | { type: 'face'; data: { id: number | string } }
-  | { type: 'image'; data: { file: string; url?: string; summary?: string } }
+  | { type: 'image'; data: { file: string; url?: string; summary?: string; sub_type?: number } }
+  | { type: 'sticker'; data: {file?: string; url?: string; summary?: string} }
   | { type: 'record'; data: { file: string; url?: string } }
   | { type: 'video'; data: { file: string; url?: string } }
   | { type: 'file'; data: { file: string; url?: string; name?: string } }
-  | { type: 'reply'; data: { id: string } }
+  | { type: 'reply'; data: { id: string | number } }
   | { type: 'forward'; data: { id: string } }
   | { type: 'json'; data: { data: string } }
   | { type: 'xml'; data: { data: string } };
@@ -16,7 +18,7 @@ export type OneBotSegment =
 export interface OneBotMessage {
   time: number;
   self_id: number;
-  post_type: 'message' | 'message_sent' | 'notice' | 'meta_event' | 'request';
+  post_type: 'message' | 'message_sent' | 'notice' | 'meta_event' | 'request' | 'qzone' | 'interact';
   message_type?: 'private' | 'group';
   sub_type?: string;
   message_id?: number;
@@ -82,7 +84,7 @@ export interface Conv {
   lastAtUserId?: number;
   /** 最近一条人类发言所引用消息的原作者 QQ（优先级高于 lastAtUserId）。 */
   quotedSenderId?: number;
-  pendingAggregatedText?: { text: string; firstAt: number; sourceTs?: string };
+  pendingAggregatedText?: { text: string; blobs: BlobInput[]; firstAt: number; sourceTs?: string };
   /** 私聊聚合到期冲刷计时器（窗口内未再来消息时，把暂存文本投递给 AI）。 */
   aggregationTimer?: ReturnType<typeof setTimeout>;
 }

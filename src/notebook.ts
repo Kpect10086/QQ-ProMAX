@@ -4,7 +4,19 @@ import type { Logger } from 'cortico/core/types.ts';
 
 /**
  * 智能体私人笔记本桥接键（由 cortico-world-memory 在 start() 时登记、stop() 时清除）。
- * 零硬依赖：记忆插件未安装/未启用时该键不存在，自动回退到原生 JSONL。
+ *
+ * **这是一个可选增强，不是依赖。** 本扩展不 import 记忆插件、也不要求它存在：
+ * - 桥接键只在记忆插件启用时才有；未安装/未启用时下面每个方法都走原生 JSONL 后端，
+ *   功能完整可用（只是没有混合检索与常驻环境提示词）。
+ * - 后端在**每次调用时惰性判定**，与 World 启动顺序无关，记忆插件中途启停也能即时切换。
+ *
+ * 为什么用 globalThis 桥接而不是事件流：框架的 `World` 契约里只有主循环回调
+ * （onTurnEnded / onEventsSettled / onBatchEnd / onIdle 等），**没有 World 之间的
+ * 发布/订阅通道**，无法把「写入另一 World 的存储」表达成事件。因此这里退而采用
+ * 最小的能力协商：被调用方主动登记一个窄接口，调用方按需探测。
+ *
+ * 副作用面很小：桥接接口只有 save/list/get/forget 四个纯数据方法，不暴露对方内部状态，
+ * 记忆插件停止时键被删除，本扩展自动回到原生后端。
  */
 const BRIDGE_KEY = 'cortico:memory:notebook';
 

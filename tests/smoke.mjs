@@ -36,8 +36,8 @@ const host={log:nullLogger(),store,isPaused:()=>paused,secret:()=>'',blob:()=>nu
 const wait=async(test,msg)=>{const until=Date.now()+7000;while(!test()&&Date.now()<until)await new Promise(r=>setTimeout(r,25));assert.ok(test(),msg);};
 try {
   await q.start(host);await wait(()=>q.connected&&q.identity?.friends.size===1,'QQ startup and identity');
-  const tools=q.tools(),recent=tools.find(t=>t.name==='qq_recent'),send=tools.find(t=>t.name==='qq_send');
-  const history=await recent.handler({peer:90000003},{});assert.match(history,/读取已开放/);assert.match(history,/不代表会话关闭/);
+  const tools=q.tools(),recent=tools.find(t=>t.name==='qq_history'),send=tools.find(t=>t.name==='qq_send');
+  const history=await recent.handler({mode:"recent",peer:90000003},{});assert.match(history,/读取已开放/);assert.match(history,/不代表会话关闭/);
   const input={post_type:'message',message_type:'private',self_id:90000001,user_id:90000003,message_id:301,time:Math.floor(Date.now()/1000)+1,sender:{nickname:'Peer'},message:[{type:'text',data:{text:'Fresh fixture input'}}]};
   clients[0].send(JSON.stringify(input));await wait(()=>deferred.some(x=>x.e.type==='qq.message'),'New private input enters deferred context');
   const deliveries=deferred.splice(0).map(x=>({type:x.e.type,value:x.e.render?.()})).filter(x=>x.value);
@@ -46,7 +46,7 @@ try {
   assert.ok(sent.length<=2);assert.equal(sent.flatMap(p=>p.message).filter(s=>s.type==='text').map(s=>s.data.text).join(''),'One!Two!Three!Four!');
   const before=saved.length;clients[0].send(JSON.stringify({...input,user_id:90000004,message_id:302}));await new Promise(r=>setTimeout(r,100));assert.equal(saved.length,before,'Unlisted peers are not read');
   cfg.replyPrivates=false;assert.match(String(await send.handler({to:'private:90000003',text:'Must not send'},{})),/私聊回复已关闭/);cfg.replyPrivates=true;
-  const feeds=await tools.find(t=>t.name==='qq_qzone_feeds').handler({num:1},{});assert.ok(String(feeds).includes('fixture-existing'));
+  const feeds=await tools.find(t=>t.name==='qq_qzone_read').handler({view:"feeds",num:1},{});assert.ok(String(feeds).includes('fixture-existing'));
   const posted=await tools.find(t=>t.name==='qq_qzone_post').handler({content:'Fixture post only on local mock'},{});assert.ok(String(posted).includes('fixture-new'));
   paused=true;assert.ok(String(await tools.find(t=>t.name==='qq_qzone_post').handler({content:'Blocked'},{})).includes('暂停'));paused=false;
   const ui=q.webUi('zh');assert.equal(ui.label,'QQ ProMAX');assert.ok(ui.panels.length>=18);assert.ok(ui.config.every(g=>g.owner==='world:qqbot'));
@@ -61,7 +61,7 @@ try {
   assert.ok(!existsSync(join(pkgDir,'web')));
   assert.ok(!existsSync(join(pkgDir,'host')));
   assert.ok(!/desktop-pet|pet-voice|pet-dressframe/.test(readFileSync(join(pkgDir,meta.cortico.webUiClient),'utf8')));
-  assert.deepEqual(JSON.parse(readFileSync(join(pkgDir,'describe.json'),'utf8')).tools,def.describe.tools);
+  assert.deepEqual(JSON.parse(readFileSync(join(pkgDir,'describe.json'),'utf8')).tools,JSON.parse(JSON.stringify(def.describe.tools)));
   assert.ok(def.describe.tools.length>=tools.length);assert.ok(requests.includes('send_msg'));
-  console.log(JSON.stringify({passed:true,package:meta.name,version:meta.version,cortico:'0.2.2',transport:'real localhost WebSocket / OneBot v11',tools:tools.length,declaredTools:def.describe.tools.length,panels:ui.panels.length,privateInput:true,replyLimit:true,whitelist:true,replySwitch:true,qzoneRead:true,qzoneReceipt:true,pauseGate:true}));
+  console.log(JSON.stringify({passed:true,package:meta.name,version:meta.version,cortico:'0.2.4',transport:'real localhost WebSocket / OneBot v11',tools:tools.length,declaredTools:def.describe.tools.length,panels:ui.panels.length,privateInput:true,replyLimit:true,whitelist:true,replySwitch:true,qzoneRead:true,qzoneReceipt:true,pauseGate:true}));
 } finally {await q.stop();for(const ws of clients)ws.terminate();await new Promise(r=>wss.close(r));}

@@ -2,7 +2,7 @@
 
 Owner: src/asr, asr_sidecar.py, package.json.
 
-QQ ProMAX 基于 [@hth768](https://github.com/hth768) 制作的 [QQ-final（cortico-world-qq-final）](https://github.com/hth768/cortico-world-qq-final) 插件开发。本版本使用 MIT 许可证，完整条款见 [LICENSE](LICENSE)。
+QQ ProMAX 基于 [@hth768](https://github.com/hth768) 制作的 [QQ-final（cortico-world-qq-final）](https://github.com/hth768/cortico-world-qq-final) 插件开发。本次同步的本地 QQ-final 0.3.3 源码声明 AGPL-3.0-or-later；本版本按该声明发布，完整条款见 [LICENSE](LICENSE)。下列旧版 MIT 来源与版权继续保留，原 MIT 条款见 LICENSE-MIT。
 
 ## QQ-final
 
