@@ -23,12 +23,39 @@ export class Vision {
   private readonly dataDir: string;
   private readonly seenFile: string;
   private saveTimer: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * 模型来源解析器，由 QQWorld 注入（三项配置经框架 ctx.secret() 解析密钥）。
+   * 未注入或配置不全时 describe 直接放弃，不再自行查 process.env。
+   */
+  private readonly resolveModel:
+    | (() => { endpoint: string; apiKey: string; model: string } | null)
+    | undefined;
+  /** 用量上报（宿主 WorldHost.reportUsage）。 */
+  private readonly reportUsage?: (usage: {
+    promptTokens: number;
+    completionTokens: number;
+    cacheHitTokens: number;
+    cacheMissTokens: number;
+  }, model: string) => void;
 
-  constructor(cfg: QQWorldConfig['vision'], log: Logger, dataDir = '') {
+  constructor(
+    cfg: QQWorldConfig['vision'],
+    log: Logger,
+    dataDir = '',
+    resolveModel?: () => { endpoint: string; apiKey: string; model: string } | null,
+    reportUsage?: (usage: {
+      promptTokens: number;
+      completionTokens: number;
+      cacheHitTokens: number;
+      cacheMissTokens: number;
+    }, model: string) => void,
+  ) {
     this.cfg = cfg;
     this.log = log.child('vision');
     this.dataDir = dataDir;
     this.seenFile = dataDir ? join(dataDir, 'vision-seen.json') : '';
+    this.resolveModel = resolveModel;
+    this.reportUsage = reportUsage;
     this.loadSeen();
   }
 
@@ -152,21 +179,34 @@ export class Vision {
   }
 
   private async describe(bytes: Uint8Array): Promise<string | null> {
-    const apiKey = process.env[this.cfg.apiKeySecret];
+    // 模型来源一律走注入的解析器（由 QQWorld 经框架 ctx.secret() 解析密钥）。
+    // 曾在这里直查 process.env，认证评审（#104）要求收敛到框架密钥读取器。
+    const injected = this.resolveModel?.();
+    if (!injected) {
+      this.log.warn('辅助视觉未配置模型（模型地址/密钥名/模型名需在配置里填齐）');
+      return null;
+    }
+    const endpoint = injected.endpoint;
+    const apiKey = injected.apiKey;
+    const model = injected.model;
     if (!apiKey) {
-      this.log.warn('缺少视觉 API Key', { secret: this.cfg.apiKeySecret });
+      this.log.warn('辅助视觉缺少 API Key', { secret: this.cfg.apiKeySecret || '(未指定)' });
+      return null;
+    }
+    if (!model) {
+      this.log.warn('辅助视觉未配置模型名', { endpoint });
       return null;
     }
     const base64 = Buffer.from(bytes).toString('base64');
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), this.cfg.timeoutMs);
     try {
-      const res = await fetch(`${this.cfg.endpoint.replace(/\/$/, '')}/chat/completions`, {
+      const res = await fetch(`${endpoint}/chat/completions`, {
         method: 'POST',
         signal: ctrl.signal,
         headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
         body: JSON.stringify({
-          model: this.cfg.model,
+          model,
           messages: [
             {
               role: 'user',
@@ -179,7 +219,17 @@ export class Vision {
         }),
       });
       if (!res.ok) return null;
-      const json = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+      const json = (await res.json()) as {
+        choices?: Array<{ message?: { content?: string } }>;
+        usage?: { prompt_tokens?: number; completion_tokens?: number };
+      };
+      // 自有模型调用上报用量（认证评审 #104 要求：控制台要能看到）。
+      this.reportUsage?.({
+        promptTokens: json.usage?.prompt_tokens ?? 0,
+        completionTokens: json.usage?.completion_tokens ?? 0,
+        cacheHitTokens: 0,
+        cacheMissTokens: 0,
+      }, model);
       const text = json.choices?.[0]?.message?.content?.trim();
       return text || null;
     } catch {

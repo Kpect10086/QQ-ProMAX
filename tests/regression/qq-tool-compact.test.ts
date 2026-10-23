@@ -30,8 +30,8 @@ function fixture(){
   return {q,dir,tools,store,calls,call};
 }
 
-it('exposes 30 tools with distinct read/write policies and keeps send scheduling semantics',()=>{
-  const {tools}=fixture();expect(tools).toHaveLength(30);expect(new Set(tools.map((t:any)=>t.name)).size).toBe(30);
+it('exposes 33 tools with distinct read/write policies and keeps send scheduling semantics',()=>{
+  const {tools}=fixture();expect(tools).toHaveLength(33);expect(new Set(tools.map((t:any)=>t.name)).size).toBe(33);
   for(const name of ['qq_confirm_send','qq_send_audio','qq_note_save','qq_alias_set','qq_recent','qq_search','qq_admin_join_approve'])
     expect(tools.some((t:any)=>t.name===name)).toBe(false);
   for(const name of ['qq_note_read','qq_affinity_read','qq_history','qq_qzone_read'])expect(tools.find((t:any)=>t.name===name).tags).toEqual(['read']);

@@ -7,6 +7,7 @@ const prepareImageRequest = async (body: Record<string, unknown>, signal?: Abort
 /** 单张表情包的元数据（按内容 sha256 去重）。 */
 export interface StickerMeta {
   /** 内容 sha256，去重主键。 */
+  emojiId?: string;
   hash: string;
   /** 文件扩展名（含点）。 */
   ext: string;
@@ -66,7 +67,9 @@ export class StickerStore {
   private saveTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(dir: string, vision: StickerVisionCfg, log: Logger, dataDir = '',
-    private readonly secret: (name: string) => string | undefined = (name) => process.env[name]) {
+    private readonly secret: (name: string) => string | undefined = (name) => process.env[name],
+    private readonly reportUsage?: (usage: {promptTokens:number;completionTokens:number;cacheHitTokens:number;cacheMissTokens:number},model:string)=>void,
+    private readonly addToFavoritesCb?: (bytes:Uint8Array,ext:string)=>Promise<string|null>) {
     this.dir = dir;
     this.vision = vision;
     this.log = log.child('sticker');
@@ -100,7 +103,7 @@ export class StickerStore {
   }
 
   /** 统计 + 最近列表，供 qq_sticker_stats 工具与控制台自查。 */
-  stats(limit = 10, query = ''): { total: number; byEmotion: Record<string, number>; recent: StickerMeta[] } {
+  stats(limit = 10, query = ''): { total: number; byEmotion: Record<string, number>; synced:number; recent: StickerMeta[] } {
     const byEmotion: Record<string, number> = {};
     for (const m of this.meta.values()) byEmotion[m.emotion] = (byEmotion[m.emotion] ?? 0) + 1;
     const recent = [...this.meta.values()]
@@ -108,7 +111,7 @@ export class StickerStore {
       .filter((m) => !query || [m.label, m.emotion, m.usage, m.tag, m.summary].join(' ').toLowerCase().includes(query.toLowerCase()))
       .sort((a, b) => b.lastSeen - a.lastSeen)
       .slice(0, limit);
-    return { total: this.meta.size, byEmotion, recent };
+    return { total: this.meta.size, byEmotion, synced:[...this.meta.values()].filter(m=>m.emojiId).length, recent };
   }
 
   async importFavorites(favorites: Array<{ url: string; summary: string }>): Promise<{ added: number; existing: number; failed: number }> {
@@ -119,6 +122,61 @@ export class StickerStore {
     }
     this.flush();
     return result;
+  }
+
+async favoriteSync(max = 50): Promise<{ checked: number; added: number; failed: number; skipped: number }> {
+    const r = { checked: 0, added: 0, failed: 0, skipped: 0 };
+    if (!this.addToFavoritesCb) {
+      r.skipped = this.meta.size;
+      return r;
+    }
+    let n = 0;
+    for (const m of this.meta.values()) {
+      if (n >= max) break;
+      if (m.emojiId) continue; // 已同步过
+      r.checked++;
+      n++;
+      try {
+        const buf = readFileSync(join(this.dir, m.file));
+        const eid = await this.addToFavoritesCb(buf, m.ext);
+        if (eid) {
+          m.emojiId = eid;
+          r.added++;
+        } else {
+          r.failed++;
+        }
+      } catch {
+        r.failed++;
+      }
+    }
+    if (r.added) this.save();
+    return r;
+  }
+
+  updateMeta(
+    file: string,
+    patch: { emotion?: string; usage?: string; tag?: string; label?: string },
+  ): StickerMeta | null {
+    let key = (file || '').trim();
+    key = key.replace(/^\[表情包:/i, '').replace(/\]$/, '').trim();
+    if (!key) return null;
+    const want = key.toLowerCase();
+    const m = [...this.meta.values()].find((x) => {
+      const f = x.file.toLowerCase();
+      return f === want || f.replace(/\.[^.]+$/, '') === want.replace(/\.[^.]+$/, '');
+    });
+    if (!m) return null;
+    const clean = (s?: string) => (typeof s === 'string' ? s.trim().slice(0, 40) : '');
+    const emo = clean(patch.emotion);
+    const uso = clean(patch.usage);
+    const tg = clean(patch.tag);
+    const lb = clean(patch.label);
+    if (emo) m.emotion = emo;
+    if (uso) m.usage = uso;
+    if (tg) m.tag = tg;
+    if (lb) m.label = lb;
+    this.scheduleSave();
+    return m;
   }
 
   private pump(): void {
@@ -170,6 +228,7 @@ export class StickerStore {
         sources: [job.conv],
       };
       this.meta.set(hash, meta);
+      if(this.addToFavoritesCb){try{const id=await this.addToFavoritesCb(bytes,ext);if(id)meta.emojiId=id;}catch(error){this.log.warn("QQ收藏同步失败，保留本地表情",{error:String(error)});}}
       await this.annotateMeta(meta, bytes);
       this.log.info('表情包已收藏', { file, label: meta.label, emotion: meta.emotion, usage: meta.usage });
       this.scheduleSave();
@@ -230,7 +289,8 @@ export class StickerStore {
         }, ctrl.signal)),
       });
       if (!res.ok) return { emotion: '未知', usage: '未知', tag: '' };
-      const json = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+      const json = (await res.json()) as { choices?: Array<{ message?: { content?: string } }>;usage?:{prompt_tokens?:number;completion_tokens?:number;prompt_cache_hit_tokens?:number} };
+      if(json.usage)this.reportUsage?.({promptTokens:json.usage.prompt_tokens??0,completionTokens:json.usage.completion_tokens??0,cacheHitTokens:json.usage.prompt_cache_hit_tokens??0,cacheMissTokens:(json.usage.prompt_tokens??0)-(json.usage.prompt_cache_hit_tokens??0)},this.vision.model);
       return this.parseAnn(json.choices?.[0]?.message?.content?.trim());
     } catch {
       return { emotion: '未知', usage: '未知', tag: '' };

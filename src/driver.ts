@@ -337,9 +337,16 @@ export class OneBotDriver {
 
   async getForwardMessages(forwardId: string, limit: number): Promise<OneBotMessage[]> {
     try {
-      const r = await this.callApi<Array<{ data: OneBotMessage }>>('get_forward_msg', { id: forwardId });
-      if (!Array.isArray(r)) return [];
-      return r.slice(0, limit).map((x) => x.data);
+      const r = await this.callApi<unknown>('get_forward_msg', { id: forwardId });
+      // 兼容多种返回形状：标准 OneBot v11 为 { messages: [...] }；部分实现（如 SnowLuma）也是 { messages: [...] }；
+      // 个别实现为 { message: [...] } 或直接返回数组。callApi 已剥掉 OneBot 应答最外层的 data 字段。
+      const list =
+        Array.isArray(r)
+          ? r
+          : r && typeof r === 'object'
+            ? ((r as Record<string, unknown>).messages ?? (r as Record<string, unknown>).message)
+            : null;
+      return Array.isArray(list) ? list.slice(0,limit).map(node=>node && typeof node==='object' && node.data && !node.type && !node.message && !node.content ? node.data : node) as OneBotMessage[] : [];
     } catch {
       return [];
     }

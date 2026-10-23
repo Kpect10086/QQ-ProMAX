@@ -526,7 +526,12 @@ export function voiceReady(cfg: RuntimeVoiceCfg, log: VoiceLog): Promise<boolean
 /* ------------------------------------------------------------------ *
  * 语义判定：本次回复是否应当用语音
  * ------------------------------------------------------------------ */
-export async function judgeVoiceWish(userText: string, cfg: RuntimeVoiceCfg, log: VoiceLog): Promise<boolean> {
+export async function judgeVoiceWish(
+  userText: string,
+  cfg: RuntimeVoiceCfg,
+  log: VoiceLog,
+  reportUsage?: (usage: { promptTokens: number; completionTokens: number; cacheHitTokens: number }, model: string) => void,
+): Promise<boolean> {
   if (!cfg.judgeApiKey) {
     log.info('[voice] 语义判定未配置 judgeApiKey，默认不发语音');
     return false;
@@ -551,9 +556,24 @@ export async function judgeVoiceWish(userText: string, cfg: RuntimeVoiceCfg, log
       }),
     });
     if (!resp.ok) throw new Error(`judge HTTP ${resp.status}`);
-    const j = (await resp.json()) as { choices?: { message?: { content?: string } }[] };
+    const j = (await resp.json()) as {
+      choices?: { message?: { content?: string } }[];
+      usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+    };
     const ans = j.choices?.[0]?.message?.content?.trim().toLowerCase() ?? '';
-    return ans.startsWith('yes');
+    const ok = ans.startsWith('yes');
+    // 语义判定每次消息调一次模型，须上报用量（认证评审 #104 要求）。
+    if (ok && reportUsage) {
+      reportUsage(
+        {
+          promptTokens: j.usage?.prompt_tokens ?? 0,
+          completionTokens: j.usage?.completion_tokens ?? 0,
+          cacheHitTokens: 0,
+        },
+        cfg.judgeModel,
+      );
+    }
+    return ok;
   } catch (e) {
     log.warn('[voice] 语义判定失败，默认不发语音', String(e));
     return false;

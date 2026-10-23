@@ -1,18 +1,19 @@
 import type {Language} from 'cortico/core/language.ts';
-import type {ToolCallContext} from 'cortico/core/types.ts';
 type WorldHost = FrameworkWorldHost & {isPaused?():boolean};
 const toolError = (error: string) => ({failed:true as const,text:error,error});
 import { spawn, type ChildProcess } from 'node:child_process';
 import {createHash, randomBytes} from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync, readdirSync, openSync, mkdirSync, renameSync, statSync } from 'node:fs';
 import { createConnection } from 'node:net';
-import { type BlobInput, type EventEnvelope, type Logger, type PromptDocDecl, type ToolDef, type ToolSpec, type World, type WorldWebUiDecl, type WorldHost as FrameworkWorldHost, type WorldLamp, type WorldPanelDecl, type WorldStreamSocket } from 'cortico/core/types.ts';
+import { type BlobInput, type EventEnvelope, type Logger, type PromptDocDecl, type ToolDef, type ToolSpec, type ToolCallContext, type World, type WorldWebUiDecl, type WorldHost as FrameworkWorldHost, type WorldLamp, type WorldPanelDecl, type WorldStreamSocket } from 'cortico/core/types.ts';
 
 import { shortTime } from 'cortico/core/util.ts';
 import { reviewContent, reviewMemory } from './content-review.ts';
+import { downloadImageBytes } from 'cortico/worlds/qq/image-download.ts';
 import {QQStreamGate} from './stream-gate.ts';
 import {outgoingChatText} from './outgoing-text.ts';
 import {QQ_QUIET_GROUP, QuietReplies, routineQuiet, quietReplyAllowed} from './quiet-hours.ts';
+import {forwardSource as inferForwardSource} from './forward-source.ts';
 import { OneBotDriver } from './driver.ts';
 import { QZonePoster, type QZoneConfig } from './qzone.ts';
 import { QQ_CONFIG_GROUP, QQ_VOICE_GROUP, QQ_CALL_GROUP, QQ_ASR_GROUP, QQ_VOXCPM_SIDECAR_GROUP, QQ_DEFAULTS, normalizeConfig, toIds, type QQConfigSection, type QQWorldConfig } from './config.ts';
@@ -25,6 +26,7 @@ import { isAbsolute, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildOutgoing, resolveEmojiFile, eventClock, eventTs, renderIncoming, renderSegmentsPlain, splitReplyIntoMessages } from './normalize.ts';
 
+const EXT_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const ENV_PROMPT_FILE = fileURLToPath(new URL('../ENV_PROMPT.md', import.meta.url));
 
 /** 去掉语音转写前缀（"[语音转写] "），用于触发词匹配 */
@@ -57,10 +59,13 @@ const PLACEHOLDER_NICKNAME = 'QQ用户';
 interface ForwardNode {
   line: string;
   body: string;
+  imageUrls: string[];
   named: boolean;
   time?: number;
   userId?: string;
   messageType?: string;
+  originGroupId?: number;
+  originPeerUin?: number;
 }
 
 interface PendingSend {
@@ -155,6 +160,7 @@ export class QQWorld implements World {
   private botStreak = new Map<string, number>();
   /** 防死循环：会话地址 -> 最近一次收到对方发言的时间戳（用于 idle 收尾判断）。 */
   private lastUserMsgAt = new Map<string, number>();
+  private lastUserMsgAtByQQ = new Map<number,number>();
   private readonly eventSockets = new Set<WorldStreamSocket>();
   private packageDir = '';
   private emojiDirAbs = '';
@@ -207,7 +213,7 @@ export class QQWorld implements World {
   private streamGate: QQStreamGate | null = null;
   private readonly quietReplies: QuietReplies;
 
-  constructor(config?: Partial<QQWorldConfig>, packageDir?: string, dataDir = '') {
+  constructor(config?: Partial<QQWorldConfig>, packageDir?: string, dataDir = '', private readonly secretResolver?: (name:string)=>string) {
     this.config = normalizeConfig((config ?? {}) as QQConfigSection);
     this.packageDir = packageDir ?? '';
     this.dataDir = dataDir;
@@ -368,8 +374,8 @@ export class QQWorld implements World {
       if (this.streamGate.pending) this.log.info('QQ暂存队列已恢复，按当前开关和名单释放', {pending:this.streamGate.pending});
       this.streamGate.start();
     }
-    this.vision = new Vision(this.config.vision, this.log, this.dataDir);
-    this.stickers = new StickerStore(this.stickerDirAbs || this.emojiDirAbs || join(this.packageDir, 'emoji'), this.config.vision, this.log, this.dataDir, (name) => this.resolveSecret(name ?? ""));
+    this.vision = new Vision(this.config.vision,this.log,this.dataDir,()=>{const c=this.config.vision,key=this.resolveSecret(c.apiKeySecret);return c.endpoint&&c.model&&key?{endpoint:c.endpoint,model:c.model,apiKey:key}:null;},(usage,model)=>this.host?.reportUsage(usage,{model,label:'QQ辅助视觉'}));
+    this.stickers = new StickerStore(this.stickerDirAbs || this.emojiDirAbs || join(this.packageDir, 'emoji'), this.config.vision, this.log, this.dataDir, (name) => this.resolveSecret(name),(usage,model)=>this.host?.reportUsage(usage,{model,label:'QQ表情标注'}),(bytes,ext)=>this.pushStickerToQQFavorites(bytes,ext));
     this.syncConfigRoster();
     this.driver = this.createDriver();
     await this.driver.start();
@@ -644,20 +650,15 @@ export class QQWorld implements World {
 
   /** 解析密钥：优先取 process.env，否则回退到 deployments/providers 下各 provider 的 .env 文件（Cortico 不把 .env 注入 process.env）。 */
   private resolveSecret(name: string): string | undefined {
-    const fromEnv = process.env[name];
-    if (fromEnv) return fromEnv;
+    const n = (name || '').trim();
+    if (!n) return undefined;
     try {
-      const providersDir = join(dirname(dirname(this.dataDir)), 'providers');
-      if (existsSync(providersDir)) {
-        for (const dir of readdirSync(providersDir)) {
-          const envPath = join(providersDir, dir, '.env');
-          if (!existsSync(envPath)) continue;
-          const m = new RegExp(`^\\s*${name}\\s*=\\s*(.+?)\\s*$`, 'm').exec(readFileSync(envPath, 'utf8'));
-          if (m) return m[1].trim();
-        }
-      }
-    } catch { /* ignore */ }
-    return undefined;
+      const v = this.secretResolver?.(n);
+      return v && v.trim() ? v.trim() : undefined;
+    } catch (e) {
+      this.log?.warn?.('密钥解析失败', { secret: n, err: String(e) });
+      return undefined;
+    }
   }
 
   /** 把配置里的语音设置解析成运行时配置（已解析密钥）。 */
@@ -1111,7 +1112,8 @@ export class QQWorld implements World {
         this.log.warn('动态/主动说话模型返回非 200', { status: res.status });
         return null;
       }
-      const json = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+      const json = (await res.json()) as { choices?: Array<{ message?: { content?: string } }>;usage?:{prompt_tokens?:number;completion_tokens?:number;prompt_cache_hit_tokens?:number} };
+      if(json.usage)this.host?.reportUsage({promptTokens:json.usage.prompt_tokens??0,completionTokens:json.usage.completion_tokens??0,cacheHitTokens:json.usage.prompt_cache_hit_tokens??0,cacheMissTokens:Math.max(0,(json.usage.prompt_tokens??0)-(json.usage.prompt_cache_hit_tokens??0))},{model,label:'QQ辅助对话'});
       const text = json.choices?.[0]?.message?.content?.trim();
       return text || null;
     } catch (e) {
@@ -1277,6 +1279,24 @@ export class QQWorld implements World {
     }
     c.active = this.isListened(kind, id);
     return c;
+  }
+
+private async pushStickerToQQFavorites(bytes: Uint8Array, ext: string): Promise<string | null> {
+    if (!this.config.sticker.addToQQFavorites) return null;
+    if (!this.driver) return null;
+    const base64 = Buffer.from(bytes).toString('base64');
+    try {
+      const res = (await this.driver.callApi('add_custom_face', { file: `base64://${base64}` })) as
+        | { emoji_id?: string; data?: { emoji_id?: string } }
+        | undefined;
+      const eid = res?.emoji_id ?? res?.data?.emoji_id ?? null;
+      if (eid) this.log.info('已加入 QQ 收藏表情', { emojiId: eid, ext });
+      else this.log.warn('add_custom_face 未返回 emoji_id', { res });
+      return eid ?? null;
+    } catch (e) {
+      this.log.warn('加入 QQ 收藏表情失败（协议端可能不支持 add_custom_face，或 QQ 收藏表情已达上限）', { err: String(e), ext });
+      return null;
+    }
   }
 
   private convLabel(address: string): string {
@@ -1469,6 +1489,7 @@ export class QQWorld implements World {
     // 收到对方发言：清零该会话的“bot 连续发言”计数，并刷新最后发言时间（防死循环）。
     this.botStreak.set(conv.address, 0);
     this.lastUserMsgAt.set(conv.address, Date.now());
+    if(ev.user_id!=null)this.lastUserMsgAtByQQ.set(Number(ev.user_id),Date.now());
     const sender = this.resolveSender(ev, kind, id);
     // 按 message_id 去重：NapCat reverse 偶发会把同一条消息事件重投两次，
     // 若直接 enqueue 会被处理两遍 → 同一消息回两遍。已在内存里出现过的消息直接丢弃。
@@ -1617,11 +1638,11 @@ export class QQWorld implements World {
         }
       }
     }
-    // 合并转发：异步展开内容作为补充事件（不阻塞主消息投递，对齐内置 lookupForward）
+    // 转发内容先就绪，再投递卡片，避免模型只见占位文字就抢先回复。
     const fwdSeg = segs.find((s) => s.type === 'forward');
     if (fwdSeg) {
       const fwdId = String((fwdSeg as { data: { id: string } }).data.id ?? '');
-      if (fwdId) this.lookupForward(fwdId, conv, ev.message_id ?? '');
+      if (fwdId) await this.lookupForward(fwdId, conv, ev.message_id ?? '');
     }
     // 纯表情消息（无文字）：face 段无 url 无法收藏但仍需进入处理链（避免静默丢弃）；
     // sticker/image 段会在下方循环里判定是否收藏。
@@ -1708,7 +1729,7 @@ export class QQWorld implements World {
 
     // 语义判定：是否应当用语音回复（对齐 qq_bot 的 _judge_voice）。
     if (this.config.voice.enabled && this.config.voice.tts && this.config.voice.semanticJudge && text.trim() && !this.host?.isPaused?.() && !this.incomingReplyBlock(conv.address)) {
-      const want = await judgeVoiceWish(text, this.voiceRuntime(), this.log);
+      const want = await judgeVoiceWish(text, this.voiceRuntime(), this.log, (usage,model)=>this.host?.reportUsage({...usage,cacheMissTokens:Math.max(0,usage.promptTokens-usage.cacheHitTokens)},{model,label:'QQ语音判定'}));
       this.voiceWish.set(conv.address, want);
     }
 
@@ -2060,21 +2081,57 @@ export class QQWorld implements World {
   }
 
   /** 合并转发节点渲染结果（对齐内置 qq 的 ForwardNode）。 */
-  private renderForwardNode(value: OneBotMessage): ForwardNode {
-    const sender = value.sender ?? {};
-    const uid = sender.user_id;
-    const isSelf = uid !== undefined && this.identity !== null && uid === this.identity.selfId;
-    const nickname = sender.nickname || sender.card;
-    const named = isSelf || (nickname !== undefined && nickname !== '' && nickname !== PLACEHOLDER_NICKNAME);
+  private renderForwardNode(value: unknown): ForwardNode {
+    const outer = value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+    const data = outer.data;
+    // 兼容两种节点形状：NapCat 记录为 { type:'node', data:{ name, uin, content } }（data 才是真正消息），
+    // 标准 OneBot node 段则直接带 sender/message。命中 node 包裹时下沉到 data。
+    const n = outer.type === 'node' && data !== null && typeof data === 'object' ? (data as Record<string, unknown>) : outer;
+    const sender =
+      n.sender !== null && typeof n.sender === 'object' ? (n.sender as Record<string, unknown>) : {};
+    const uidValue = sender.user_id ?? n.user_id ?? n.uin;
+    const uid =
+      typeof uidValue === 'string' || typeof uidValue === 'number' ? uidValue : undefined;
+    const isSelf = uid !== undefined && this.identity !== null && String(uid) === String(this.identity.selfId);
+    const nicknameValue = sender.nickname ?? sender.card ?? n.nickname ?? n.name;
+    const nickname =
+      typeof nicknameValue === 'string' && nicknameValue && nicknameValue !== PLACEHOLDER_NICKNAME
+        ? nicknameValue
+        : undefined;
     const name = isSelf ? '你' : nickname ?? (uid !== undefined ? String(uid) : '?');
-    const body = typeof value.message === 'string' ? value.message : renderSegmentsPlain(value.message ?? []);
+    const messageType = typeof n.message_type === 'string' ? n.message_type : undefined;
+    // 转发来源：群转发取 group_id，私聊转发取对方 QQ（排除自己），用于事件头标注「转发来源群/人」。
+    const gidRaw = n.group_id;
+    const originGroupId =
+      typeof gidRaw === 'number' && gidRaw > 0
+        ? gidRaw
+        : typeof gidRaw === 'string' && /^\d+$/.test(gidRaw)
+          ? Number(gidRaw)
+          : undefined;
+    let originPeerUin: number | undefined;
+    if (!originGroupId && messageType !== 'group' && uid !== undefined && !isSelf) {
+      const u = typeof uid === 'number' ? uid : Number(uid);
+      if (Number.isFinite(u) && u > 0) originPeerUin = u;
+    }
+    // 正文兼容三种来源：NapCat 用 content，标准节点用 message（段数组或字符串），退化用 raw_message。
+    const raw = n.content ?? n.message ?? n.raw_message;
+    const body =
+      typeof raw === 'string'
+        ? raw
+        : Array.isArray(raw)
+          ? renderSegmentsPlain(raw as OneBotSegment[])
+          : '';
     return {
       line: `${name}${uid !== undefined ? `(${uid})` : ''}: ${body}`,
       body,
-      named,
-      time: value.time != null ? Number(value.time) : undefined,
+      imageUrls: Array.isArray(raw) ? raw.filter(s => s?.type === 'image' || s?.type === 'sticker')
+        .map(s => String(s.data?.url ?? s.data?.file ?? '')) : [],
+      named: isSelf || nickname !== undefined,
+      time: n.time != null ? Number(n.time) : undefined,
       userId: uid !== undefined ? String(uid) : undefined,
-      messageType: value.message_type,
+      messageType,
+      originGroupId,
+      originPeerUin,
     };
   }
 
@@ -2086,37 +2143,55 @@ export class QQWorld implements World {
   }
 
   /** 展开合并转发消息并作为补充事件投递（对齐内置 qq 的 lookupForward）。 */
-  private lookupForward(resId: string, conv: Conv, ofMessageId: number | string): void {
-    if (!this.canRead(conv.address)) return;
+  private async lookupForward(resId: string, conv: Conv, ofMessageId: number | string): Promise<void> {
+    if(!this.canRead(conv.address))return;
     const driver = this.driver;
     const host = this.host;
     if (!driver || !host) return;
-    void driver
+    await driver
       .getForwardMessages(resId, this.config.forwardExpandLimit)
-      .then((nodes) => {
+      .then(async (nodes) => {
         if (!this.host || !this.canRead(conv.address)) return;
         const rendered = nodes.map((n) => this.renderForwardNode(n));
-        // 合并转发自身节点塌缩补回（NapCat 常把“你转发的内容”单独成段但省略身份，需补全为“你”）
-        if (this.identity && !rendered.some((n) => n.userId != null && Number(n.userId) === this.identity!.selfId)) {
-          rendered.unshift({
-            line: `你(${this.identity.selfId}): （你在转发里发的内容）`,
-            body: '（你在转发里发的内容）',
-            named: true,
-            userId: String(this.identity.selfId),
-          });
-        }
         const collapsed = this.forwardIdentityCollapsed(rendered);
+        const src = this.identity
+          ? inferForwardSource(rendered, this.identity, conv.kind, conv.id)
+          : null;
         const body = rendered.length ? rendered.map((n) => n.line).join('\n') : '(转发记录是空的)';
-        const header = collapsed
-          ? `[系统] #${ofMessageId} 引用的转发消息展开如下（里面的发言人身份没能取到，可能是多个人在说话）：`
-          : `[系统] #${ofMessageId} 引用的转发消息展开如下：`;
-        void this.pushIncomingMessage({
+        const images = rendered.flatMap((node, index) => node.imageUrls.map((url, imageIndex) => ({url, index, imageIndex})));
+        const blobs: BlobInput[] = [];
+        const imageNotes = await Promise.all(images.slice(0, this.config.forwardExpandLimit).map(async ({url, index, imageIndex}, attachmentIndex) => {
+          const label = `转发第${index + 1}条图片${imageIndex + 1}`;
+          if (!/^https?:\/\//i.test(url)) return `[${label}未读取：协议端未提供可下载地址]`;
+          this.recentImages.push({url, conv:conv.address, at:Date.now()});
+          if (this.recentImages.length > 50) this.recentImages.shift();
+          if (!this.config.deliverImageAttachments) return `[${label}未读取：图片附件已关闭]`;
+          if (!host.modelFacts.accepts('image/jpeg') && !host.modelFacts.accepts('image/png')) return `[${label}未读取：当前模型不支持图片]`;
+          try {
+            const image = await downloadImageBytes(url, {timeoutMs:this.config.vision.timeoutMs, maxImageBytes:this.config.vision.maxBytes});
+            if (!this.host || !this.canRead(conv.address)) return '';
+            if (!host.modelFacts.accepts(image.mime)) return `[${label}未读取：当前模型不支持${image.mime}]`;
+            blobs[attachmentIndex] = {bytes:image.buffer, mime:image.mime, name:`qq-forward-${index + 1}-${imageIndex + 1}`, fallbackText:`[${label}]`};
+            return `[${label}已附在本事件中]`;
+          } catch (error) {
+            this.log.warn('下载转发图片失败', {messageId:ofMessageId, node:index + 1, image:imageIndex + 1, err:String(error)});
+            return `[${label}未读取：图片下载失败]`;
+          }
+        }));
+        if (images.length > this.config.forwardExpandLimit) imageNotes.push(`[另有${images.length - this.config.forwardExpandLimit}张图片超过转发展开上限，未读取]`);
+        if (!this.host || !this.canRead(conv.address)) return;
+        const headerBase = collapsed
+          ? `[系统] #${ofMessageId} 引用的转发消息展开如下（里面的发言人身份没能取到，可能是多个人在说话）`
+          : `[系统] #${ofMessageId} 引用的转发消息展开如下`;
+        const header = src ? `${headerBase}（转发来源：${src.label}）：` : `${headerBase}：`;
+        await this.pushIncomingMessage({
           type: 'qq.forward',
           ts: eventTs(this.config.timezone),
           source: SOURCE,
-          text: `${header}\n${body}`,
+          text: `${header}\n${body}${imageNotes.length ? '\n' + imageNotes.filter(Boolean).join('\n') : ''}`,
+          blobs:blobs.filter(Boolean),
           senderKey: conv.address,
-          meta: { conv: conv.address, forward_id: resId },
+          meta: { conv: conv.address, forward_id: resId, forward_source: src?.source ?? null },
         });
       })
       .catch((err) => {
@@ -2165,7 +2240,8 @@ export class QQWorld implements World {
     const al = this.config.antiLoop;
     if (!al.enabled) return null;
     const streak = this.botStreak.get(address) ?? 0;
-    const lastUser = this.lastUserMsgAt.get(address);
+    let lastUser = this.lastUserMsgAt.get(address);
+    if(address.startsWith('private:')){const at=this.lastUserMsgAtByQQ.get(Number(address.slice(8)));if(at!==undefined&&(lastUser===undefined||at>lastUser))lastUser=at;}
     // 没有“对方发言基线”时不启用 idle 收尾，否则会话启动后 bot 发第一条就会被永久拦住
     const sinceUser = lastUser == null ? -1 : Date.now() - lastUser;
     if (streak >= al.maxConsecutiveBotTurns) {
@@ -2249,7 +2325,7 @@ export class QQWorld implements World {
     throw new Error('图片需为实际图片 URL、log:/mem: 图片附件或表情库真实文件名；不允许任意本机文件路径。');
   }
 
-  private async sendMessage(address: string, params: Record<string, unknown>, counts = this.replyCounts(address), beforeSend?: () => boolean): Promise<any> {
+  private async sendMessage(address: string, params: Record<string, unknown>, counts = this.replyCounts(address), beforeSend?: () => boolean, action: 'send_msg'|'send_forward_msg' = 'send_msg'): Promise<any> {
     if (Array.isArray(params.message)) {
       params = {...params, message: params.message.filter(segment => segment.type !== 'face'
         && !(address.startsWith('private:') && segment.type === 'reply'))};
@@ -2261,11 +2337,11 @@ export class QQWorld implements World {
     if (beforeSend && !beforeSend()) throw new Error('会话已更新，取消旧的主动草稿。');
     counts.set(address, count + 1);
     let result: any;
-    try {result = await this.driver!.callApi('send_msg',params);}
+    try {result = await this.driver!.callApi(action,params);}
     catch (error) {counts.set(address,(counts.get(address) ?? 1) - 1);throw error;}
     this.proactive?.notifySent(address);
-    const segments = params.message as OneBotSegment[];
-    const text = renderSegmentsPlain(segments);
+    const segments = Array.isArray(params.message) ? params.message as OneBotSegment[] : [];
+    const text = action==='send_forward_msg' ? '[合并转发] '+String((params.messages as unknown[]).length)+' 条原消息' : renderSegmentsPlain(segments);
     const messageId = result?.message_id != null ? String(result.message_id) : undefined;
     this.log.info(`QQ已发送 ${this.convLabel(address)}（消息 ${messageId ?? '未返回编号'}）：${text.replace(/\s+/g, ' ')}`, {address, messageId, text});
     try {
@@ -3135,8 +3211,11 @@ export class QQWorld implements World {
   /** 探测本地 ASR 侧车依赖：python 解释器 + asr_sidecar.py + 模型目录。不写死任何机器路径：全部由 asr.local* 配置与环境变量决定。 */
   private resolveAsrSidecar(): { python: string; script: string; modelPath: string; engine: string } | null {
     const asr = this.config.asr;
-    // 框架有时把 packageDir 指向 bots/<bot> 而非扩展目录，故回退多个"包相对"候选位置找脚本（不含任何绝对机器路径）
+    // 优先在本扩展真实目录（EXT_ROOT，从模块位置推算，不受 packageDir 指错影响）找脚本，
+    // packageDir 仅作兜底候选（不含任何绝对机器路径）。
     const scriptCands = [
+      join(EXT_ROOT, 'asr_sidecar.py'),
+      join(EXT_ROOT, 'src', 'asr_sidecar.py'),
       join(this.packageDir, 'asr_sidecar.py'),
       join(this.packageDir, 'src', 'asr_sidecar.py'),
     ];
@@ -3144,9 +3223,8 @@ export class QQWorld implements World {
     for (const c of scriptCands) {
       if (existsSync(c)) { script = c; break; }
     }
-    if (!script) script = this.scanAsrScript();
     if (!script) {
-      this.log.warn('[asr-sidecar] 找不到 asr_sidecar.py，已尝试：' + scriptCands.join(' ; '));
+      this.log.warn('[asr-sidecar] 找不到 asr_sidecar.py（仅从本扩展目录查找）：' + scriptCands.join(' ; '));
       return null;
     }
     // venv：显式配置 > 包相对探测（<扩展>/venv_vox 或 <扩展>/venv），不写死任何机器路径
@@ -3156,10 +3234,12 @@ export class QQWorld implements World {
       python = join(venv, 'Scripts', 'python.exe');
     } else {
       const cands = [
+        join(EXT_ROOT, 'venv_vox', 'Scripts', 'python.exe'),
+        join(EXT_ROOT, 'venv', 'Scripts', 'python.exe'),
         join(this.packageDir, 'venv_vox', 'Scripts', 'python.exe'),
         join(this.packageDir, 'venv', 'Scripts', 'python.exe'),
       ];
-      python = cands.find((c) => existsSync(c)) || join(this.packageDir, 'venv_vox', 'Scripts', 'python.exe');
+      python = cands.find((c) => existsSync(c)) || join(EXT_ROOT, 'venv_vox', 'Scripts', 'python.exe');
     }
     if (!existsSync(python)) {
       this.log.warn('[asr-sidecar] 未找到 python 解释器：' + python + '（请在 asr.localVenv 配置 venv 目录，或把 venv 放到 <扩展>/venv_vox）');
@@ -3175,6 +3255,7 @@ export class QQWorld implements World {
     if (!modelPath || !existsSync(modelPath)) {
       const mdCands = [
         process.env.QQBOT_ASR_MODEL_DIR || '',
+        join(EXT_ROOT, 'models', defModelName),
         join(this.packageDir, 'models', defModelName),
       ];
       modelPath = mdCands.find((c) => c && existsSync(c)) || '';
@@ -3364,6 +3445,161 @@ export class QQWorld implements World {
         return JSON.stringify({sent: true, address, message_id: (result as {message_id?: number})?.message_id});
       },
     };
+const forwardById: ToolDef = {
+      name: 'qq_forward_by_id',
+      tags: ['speak'],
+      barrierAfter: true,
+      endsTurn: true,
+      description:
+        '把本会话中实际接收或发出、本地有记录的消息编号合成一张 QQ 转发卡片，发往群或私聊。编号取消息行首 #编号，不得编造。卡片由 bot 自己发出，逐条标注原发送者昵称和 QQ 号并保留原文、图片和引用，不伪造身份。默认关闭，须先开启「允许按消息 id 原样转发」；协议端须支持 send_forward_msg 和 get_msg，不支持时返回错误。',
+      parameters: {
+        type: 'object',
+        properties: {
+          to: { type: 'string', description: '转发目标，原样复制事件 meta 里的 conv 字段。群聊填 "group:<群号>"，私聊填 "private:<QQ号>"。' },
+          message_ids: { type: 'array', items: { type: 'number' }, description: '要合并转发的消息编号数组（即消息行首的 #编号，对应 QQ 真实 message_id）。每条必须在本会话本地记录内存在，否则该条被跳过并提示。多条会合成「一张」合并转发卡片。' },
+        },
+        required: ['to', 'message_ids'],
+      },
+      handler: async (args) => {
+        if (!this.config.forwardByMessageId) {
+          return '「允许按消息 id 原样转发」功能未开启（设置项 worlds.qqbot.forwardByMessageId）。请先在控制台开启后再调用本工具。';
+        }
+        const to = String(args.to ?? '').trim();
+        const ids = Array.isArray(args.message_ids) ? args.message_ids.map((x: unknown) => Number(x)).filter((n: number) => Number.isFinite(n)) : [];
+        if (!ids.length) return 'message_ids 不能为空，且必须是数字编号数组（消息行首的 #编号）。';
+        const target = this.resolveTarget(to);
+        if (!target) return 'to 格式应为 "group:<群号>" 或 "private:<QQ号>"（直接复制事件 meta 里的 conv 字段）。';
+        const address = `${target.kind}:${target.id}`;
+        const blocked=this.checkQuiet(address);if(blocked)return blocked;
+        if(this.host?.isPaused?.())return 'Run paused';
+        if (!this.isListened(target.kind, target.id)) {
+          return `该${target.kind === 'group' ? '群' : '私聊'}不在监听名单内，无法转发。`;
+        }
+        if (!this.driver) return '协议端未连接，无法转发。';
+        const selfId = this.identity?.selfId ?? 0;
+        if (!selfId) return 'bot 身份尚未加载，暂无法合并转发，稍候重试。';
+        const skipped: Array<{ id: number; reason: string }> = [];
+        const nodes: Array<Record<string, unknown>> = [];
+        for (const id of ids) {
+          const rec = this.knownMessages.get(String(id));
+          if (!rec) {
+            skipped.push({ id, reason: '本 bot 本地记录中不存在该消息编号（只能转发本 bot 见过/发出过的消息）' });
+            continue;
+          }
+          if (rec.conv !== address) {
+            skipped.push({ id, reason: `该消息属于其他会话（${rec.conv}），不能作为「${address}」的转发目标` });
+            continue;
+          }
+          // 逐条拉回原文：send_forward_msg 无法引用远端消息，必须由本 bot 取出内容再合成卡片。
+          let msg: any = null;
+          try {
+            msg = await this.driver.callApi('get_msg', { message_id: id });
+          } catch (e) {
+            skipped.push({ id, reason: '拉取原消息失败：' + String(e) });
+            continue;
+          }
+          if (!msg || !msg.message) {
+            skipped.push({ id, reason: '拉取原消息为空（可能已撤回/不可读）' });
+            continue;
+          }
+          const sender = (msg.sender ?? {}) as Record<string, unknown>;
+          const uid = sender.user_id != null ? Number(sender.user_id) : undefined;
+          const name = (sender.nickname as string) || (sender.card as string) || (uid != null ? String(uid) : '某人');
+          const srcLabel = `【来自 ${name}${uid != null ? `(${uid})` : ''}】\n`;
+          const segs: unknown = msg.message;
+          // node 身份只能是 bot 自己（OneBot 限制），因此用真实昵称作展示名 + 文本行标注来源，
+          // 原文内容原样保留（数组段直接内嵌，含图片/引用等富媒体）。
+          const content: unknown = Array.isArray(segs)
+            ? [{ type: 'text', data: { text: srcLabel } }, ...segs]
+            : srcLabel + (typeof segs === 'string' ? segs : '');
+          nodes.push({ type: 'node', data: { user_id: selfId, nickname: name, content } });
+        }
+        if (!nodes.length) {
+          return '没有可转发的消息。' + (skipped.length ? '\n跳过：' + skipped.map((s) => `#${s.id}（${s.reason}）`).join('；') : '');
+        }
+        const params: Record<string, unknown> = { messages: nodes };
+        if (target.kind === 'group') params.group_id = target.id;
+        else params.user_id = target.id;
+        try {
+          if(this.host?.isPaused?.())return 'Run paused';
+          const blocked=this.checkQuiet(address);if(blocked)return blocked;
+          if(this.config.contentReviewUrl&&!(await reviewContent(this.config.contentReviewUrl,JSON.stringify(nodes),'message')).allow)return '内容审核未放行，未转发';
+          if(this.host?.isPaused?.())return 'Run paused';
+          const blockedAfterReview=this.checkQuiet(address);if(blockedAfterReview)return blockedAfterReview;
+          const receipt=await this.sendMessage(address,params,undefined,()=>!this.host?.isPaused?.()&&!this.checkQuiet(address),'send_forward_msg');
+          if(receipt?.message_id!=null){this.knownMessages.set(String(receipt.message_id),{conv:address,ts:Date.now()});this.scheduleSaveState();}
+        } catch (e) {
+          return '合并转发发送失败：' + String(e) + (skipped.length ? '\n（另有跳过：' + skipped.map((s) => `#${s.id}（${s.reason}）`).join('；') + '）' : '');
+        }
+        let result = `已把 ${nodes.length} 条消息合并成「一张」卡片转发到 ${this.convLabel(address)}（卡片由本 bot 发出，已标注每条来源、原文不变）。`;
+        if (skipped.length) {
+          result += `\n${skipped.length} 条未纳入：` + skipped.map((s) => `#${s.id}（${s.reason}）`).join('；');
+        }
+        return result;
+      },
+    };
+
+    const stickerToFavorites: ToolDef = {
+      name: 'qq_sticker_to_favorites',
+      tags: ['speak'],
+      barrierAfter: true,
+      description:
+        '批量把尚未同步的历史表情包补推到登录账号的 QQ 收藏表情。须开启「同步到 QQ 收藏表情」，协议端支持 add_custom_face。新收藏会自动同步，无需重复调用。QQ 数量上限或协议不支持会返回失败；数量超限时可清理 QQ 收藏后重试。',
+      parameters: {
+        type: 'object',
+        properties: { limit: { type: 'number', description: '本次最多补推多少张，默认 50，最大 200。批量失败或量大时可分多次调。' } },
+        required: [],
+      },
+      handler: async (args) => {
+        if (!this.config.sticker.addToQQFavorites) {
+          return '请先在设置里开启「同步到 QQ 收藏表情」（worlds.qqbot.sticker.addToQQFavorites）再调本工具。';
+        }
+        if (!this.stickers) return '表情包收藏未启用，无法同步。';
+        if (!this.driver) return '协议端未连接，无法同步到 QQ。';
+        const limit = typeof args.limit === 'number' && Number.isFinite(args.limit) ? Math.max(1, Math.min(200, args.limit)) : 50;
+        const r = await this.stickers.favoriteSync(limit);
+        let msg = `本次检查 ${r.checked} 张、成功加入 QQ 收藏 ${r.added} 张、失败 ${r.failed} 张（已同步过的跳过 ${r.skipped} 张）。`;
+        if (r.failed > 0) msg += '\n失败的通常是 QQ 收藏表情数量已达上限或图片格式不被接受；删掉部分 QQ 收藏表情后重试即可。';
+        return msg;
+      },
+    };
+
+    const stickerTag: ToolDef = {
+      name: 'qq_sticker_tag',
+      tags: ['write', 'read'],
+      barrierAfter: true,
+      description:
+        '修改某张已收藏表情包的标注（情感 emotion / 用处 usage / 短标签 tag / 显示名 label），并持久化保存。\n' +
+        '用途：自动标注不准（如情感写成「未知」）或你想按自己的习惯整理表情库时，用本工具改标注；改完后 qq_sticker_stats 里看到的就是新标注。\n' +
+        '先调 qq_sticker_stats 拿到真实文件名（如 sticker-xxxx.jpg），再调本工具指定要改的字段；只传想改的字段，其余保持不变。文件名也接受 [表情包:sticker-xxxx.jpg] 写法。',
+      parameters: {
+        type: 'object',
+        properties: {
+          file: { type: 'string', description: '表情包文件名（来自 qq_sticker_stats），如 sticker-abc123.jpg。' },
+          emotion: { type: 'string', description: '可选：新的情感标签（如 开心/撒娇/嘲讽/无奈）。' },
+          usage: { type: 'string', description: '可选：新的适用场景（如 回应夸奖/表达无语）。' },
+          tag: { type: 'string', description: '可选：新的 2-4 字短标签。' },
+          label: { type: 'string', description: '可选：新的显示短名。' },
+        },
+        required: ['file'],
+      },
+      handler: async (args) => {
+        this.log.info('调用 qq_sticker_tag');
+        if (!this.stickers) return '表情包收藏未启用，无法修改标注。';
+        const file = typeof args.file === 'string' ? args.file : '';
+        if (!file.trim()) return '请指定要修改的文件名（可先调 qq_sticker_stats 查询）。';
+        const patch: { emotion?: string; usage?: string; tag?: string; label?: string } = {};
+        if (typeof args.emotion === 'string' && args.emotion.trim()) patch.emotion = args.emotion;
+        if (typeof args.usage === 'string' && args.usage.trim()) patch.usage = args.usage;
+        if (typeof args.tag === 'string' && args.tag.trim()) patch.tag = args.tag;
+        if (typeof args.label === 'string' && args.label.trim()) patch.label = args.label;
+        if (!Object.keys(patch).length) return '没有传入任何要修改的字段（emotion/usage/tag/label 至少填一个）。';
+        const m = this.stickers.updateMeta(file, patch);
+        if (!m) return `没有找到表情包「${file}」，请先用 qq_sticker_stats 查看已有表情包的真实文件名。`;
+        return `已更新标注并保存：[表情包:${m.file}] ${m.label}（情感:${m.emotion} / 用处:${m.usage}${m.tag ? ' / 标签:' + m.tag : ''}）`;
+      },
+    };
+
     const send: ToolDef = {
       name: 'qq_send',
       tags: ['speak'],
@@ -4406,7 +4642,7 @@ export class QQWorld implements World {
       },
     };
 
-    const tools: ToolDef[] = [send, confirm, viewImage, stickerStats, proactiveStatus, proactiveTrigger, qzonePost, qzoneDelete, qzoneReply, qzoneFeeds, qzoneStatus, poke, reminderAdd, reminderList, reminderCancel, affinityAdjust, affinityGet, affinityList, aliasSet, aliasForget, aliasList, noteSave, noteList, noteGet, noteForget, adminRecall, adminAtAll, adminNotice, adminJoinList, adminJoinApprove, adminJoinReject, adminTitle, adminBan, adminBanAll, adminKick, voicecall, ...makeHistoryTools({
+    const tools: ToolDef[] = [forwardById,stickerToFavorites,stickerTag,send, confirm, viewImage, stickerStats, proactiveStatus, proactiveTrigger, qzonePost, qzoneDelete, qzoneReply, qzoneFeeds, qzoneStatus, poke, reminderAdd, reminderList, reminderCancel, affinityAdjust, affinityGet, affinityList, aliasSet, aliasForget, aliasList, noteSave, noteList, noteGet, noteForget, adminRecall, adminAtAll, adminNotice, adminJoinList, adminJoinApprove, adminJoinReject, adminTitle, adminBan, adminBanAll, adminKick, voicecall, ...makeHistoryTools({
 
       getHost: () => this.host,
       sourceId: SOURCE,

@@ -63,5 +63,5 @@ try {
   assert.ok(!/desktop-pet|pet-voice|pet-dressframe/.test(readFileSync(join(pkgDir,meta.cortico.webUiClient),'utf8')));
   assert.deepEqual(JSON.parse(readFileSync(join(pkgDir,'describe.json'),'utf8')).tools,JSON.parse(JSON.stringify(def.describe.tools)));
   assert.ok(def.describe.tools.length>=tools.length);assert.ok(requests.includes('send_msg'));
-  console.log(JSON.stringify({passed:true,package:meta.name,version:meta.version,cortico:'0.2.4',transport:'real localhost WebSocket / OneBot v11',tools:tools.length,declaredTools:def.describe.tools.length,panels:ui.panels.length,privateInput:true,replyLimit:true,whitelist:true,replySwitch:true,qzoneRead:true,qzoneReceipt:true,pauseGate:true}));
+  console.log(JSON.stringify({passed:true,package:meta.name,version:meta.version,cortico:'0.2.6',transport:'real localhost WebSocket / OneBot v11',tools:tools.length,declaredTools:def.describe.tools.length,panels:ui.panels.length,privateInput:true,replyLimit:true,whitelist:true,replySwitch:true,qzoneRead:true,qzoneReceipt:true,pauseGate:true}));
 } finally {await q.stop();for(const ws of clients)ws.terminate();await new Promise(r=>wss.close(r));}

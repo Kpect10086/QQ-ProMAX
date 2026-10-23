@@ -187,7 +187,7 @@ export const definition: WorldDefinition<QQConfigSection> = {
     return [];
   },
   create(ctx) {
-    return new QQWorld(ctx.cfg, ctx.packageDir, ctx.dataDir);
+    return new QQWorld(ctx.cfg, ctx.packageDir, ctx.dataDir, name=>ctx.secret(name));
   },
   describe: {
     tools: describeTools(QQWorld.describeToolSpecs(), TOOL_SUMMARIES),

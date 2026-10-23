@@ -106,6 +106,7 @@ export interface QQWorldConfig {
   maxMessageBytes: number;
   /** 合并转发消息最多展开条数。 */
   forwardExpandLimit: number;
+  forwardByMessageId: boolean;
   /** 本地表情包图片目录（相对扩展或绝对路径），供发送 `[表情包:文件名]` 标记使用。 */
   emojiDir: string;
   /** 是否把图片作为附件交给模型（需要模型支持图像）。 */
@@ -133,6 +134,7 @@ export interface QQWorldConfig {
     enabled: boolean;
     /** 采集范围：sticker=仅 OneBot sticker/image.subType=sticker；allImages=所有图片都当表情候选。 */
     captureMode: 'sticker' | 'allImages';
+    addToQQFavorites: boolean;
     /** 表情包落盘目录（相对扩展或绝对），空则复用 emojiDir。 */
     dir: string;
   };
@@ -357,7 +359,7 @@ export const QQ_DEFAULTS: QQWorldConfig = {
   replyGroups: true,
   replyPrivates: true,
   mode: 'reverse',
-  allowPrivateRedirect: true,
+  allowPrivateRedirect: false,
   wsUrl: 'ws://127.0.0.1:3001',
   // 反向监听默认只绑回环：绑 0.0.0.0 会让同网段任何机器都能连进来，
   // 拿到 bot 要发的消息、伪造事件，甚至借群管鉴权接口越权。要对外监听请显式改这一项。
@@ -374,6 +376,7 @@ export const QQ_DEFAULTS: QQWorldConfig = {
   replyMaxGapSec: 600,
   maxMessageBytes: 1500,
   forwardExpandLimit: 20,
+  forwardByMessageId:false,
   emojiDir: 'emoji',
   deliverImageAttachments: true,
   splitReplyBySentence: true,
@@ -392,6 +395,7 @@ export const QQ_DEFAULTS: QQWorldConfig = {
   sticker: {
     enabled: true,
     captureMode: 'sticker',
+    addToQQFavorites:false,
     dir: '',
   },
   proactive: {
@@ -675,6 +679,8 @@ export const QQ_CONFIG_GROUP: ConfigGroup = {
       'worlds.qqbot.admin.allowSelf': { type: 'boolean', title: 'AI可自主管理', 'x-hot': true, description: '为 true 时，bot（AI 本人）可自行判断并执行管理操作（撤回/禁言/公告等），无需某个人下令。为 false 则仅“授权指挥官”（白名单/群管/群主）能触发，普通成员无法让 bot 行动，但 bot 也不会在有人刚发言的会话里自主管理。群主/管理员始终受 protectOwner/protectAdmins 保护。注意：踢人（qq_admin_kick）不受此项放行，由“AI可自主踢人”单独控制。' },
       'worlds.qqbot.admin.allowSelfKick': { type: 'boolean', title: 'AI可自主踢人', 'x-hot': true, description: '为 true 时，bot 可自行判断把成员踢出群（无需人下令）。默认 false：踢人不可逆，只认“授权指挥官”（白名单/群管理员/群主）在对话里明确下令，普通成员与 AI 自主都不行。群主/管理员仍受 protectOwner/protectAdmins 保护。' },
       'worlds.qqbot.admin.kickRejectRejoin': { type: 'boolean', title: '踢人时拒绝再加群', 'x-hot': true, description: '为 true（默认）时，踢出群聊的同时附带“拒绝该用户再次加群”。为 false 则只踢出，对方仍可重新申请（能否进来取决于审核设置）。' },
+      'worlds.qqbot.forwardByMessageId': {type:'boolean',title:'允许按消息编号合并转发','x-hot':true},
+      'worlds.qqbot.sticker.addToQQFavorites': {type:'boolean',title:'同步到 QQ 收藏表情','x-hot':true,description:'默认关闭，开启后才会上传收藏图片；不支持 add_custom_face 时仍保留本地表情。'},
       'worlds.qqbot.allowPrivateRedirect': { type: 'boolean', title: '允许私聊分流', 'x-hot': true, description: '为 true 时，群里若话题涉及隐私 / 尴尬 / 敏感，bot 可把回复改为私聊发送给当事人（而非群里公开）：qq_send 对 private:<QQ> 目标会跳过监听名单限制，直接向该群成员私聊。为 false 则只能在群里回复，无法私聊分流。' },
       'worlds.qqbot.selfName': { type: 'string', title: '自称(第一人称)', 'x-hot': true, description: '主动说话调度器与作息状态文本里使用的自称。留空=回退到登录 QQ 昵称、再回退「我」；填了则强制用此值，换称呼零改码。' },
   },
@@ -869,6 +875,8 @@ export function normalizeConfig(raw: QQConfigSection): QQWorldConfig {
   if (typeof c.maxSequenceGap !== 'number') c.maxSequenceGap = QQ_DEFAULTS.maxSequenceGap;
   if (typeof c.replyMaxGapSec !== 'number') c.replyMaxGapSec = QQ_DEFAULTS.replyMaxGapSec;
   if (typeof c.maxMessageBytes !== 'number') c.maxMessageBytes = QQ_DEFAULTS.maxMessageBytes;
+  if(typeof c.forwardByMessageId!=='boolean')c.forwardByMessageId=false;
+  if(typeof c.sticker.addToQQFavorites!=='boolean')c.sticker.addToQQFavorites=false;
   if (typeof c.forwardExpandLimit !== 'number') c.forwardExpandLimit = QQ_DEFAULTS.forwardExpandLimit;
   if (typeof c.splitReplyBySentence !== 'boolean') c.splitReplyBySentence = true;
   if (typeof c.sentencesPerMessage !== 'number') c.sentencesPerMessage = 1;
@@ -1075,7 +1083,7 @@ export function normalizeConfig(raw: QQConfigSection): QQWorldConfig {
   if (typeof adm.allowSelfKick !== 'boolean') adm.allowSelfKick = false;
   if (typeof adm.kickRejectRejoin !== 'boolean') adm.kickRejectRejoin = true;
   c.admin = adm as QQWorldConfig['admin'];
-  if (typeof c.allowPrivateRedirect !== 'boolean') c.allowPrivateRedirect = true;
+  if (typeof c.allowPrivateRedirect !== 'boolean') c.allowPrivateRedirect = false;
   return c;
 }
 

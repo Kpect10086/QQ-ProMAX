@@ -4,11 +4,11 @@ Owner: src/definition.ts, src/world.ts, src/config.ts.
 
 本插件基于 [@hth768](https://github.com/hth768) 制作的 [QQ-final（cortico-world-qq-final）](https://github.com/hth768/cortico-world-qq-final) 插件开发。
 
-QQ ProMAX 是 Cortico 的 QQ World 扩展，支持 QQ 群聊、私聊、空间、消息历史、表情包和语音，适配 Cortico 0.2.4 / World API 6。当前版本已移除桌宠功能，按当前上游源码的 AGPL-3.0-or-later 发布。
+QQ ProMAX 是 Cortico 的 QQ World 扩展，支持 QQ 群聊、私聊、空间、消息历史、表情包和语音，适配 Cortico 0.2.6 / World API 6。当前版本已移除桌宠功能，按当前上游源码的 AGPL-3.0-or-later 发布。
 
 ## 安装
 
-在 Cortico 扩展页搜索 QQ ProMAX，或手动安装 npm 包 `cortico-world-qq-promax@0.1.2`，重启已有 Cortico 后加载。也可以从本仓库下载或检出源码，在扩展页选择本机目录安装。
+在 Cortico 扩展页搜索 QQ ProMAX，或手动安装 npm 包 `cortico-world-qq-promax@0.1.3`，重启已有 Cortico 后加载。也可以从本仓库下载或检出源码，在扩展页选择本机目录安装。
 
 本扩展与 cortico-world-qq-final 使用相同的 World id（qqbot）。迁移时保留 worlds.qqbot 配置，先停用并卸载旧扩展，再安装本扩展；不可同时加载两份 qqbot。
 
@@ -32,7 +32,7 @@ QQ 空间默认关闭，开启后依赖协议端支持对应扩展接口。qq_qz
 
 ## 许可证
 
-本版本按同步源码声明的 [AGPL-3.0-or-later](LICENSE) 发布，保留上游版权声明；旧版 MIT 来源与条款保存在 [第三方声明](THIRD_PARTY_NOTICES.md) 和 LICENSE-MIT。完整可编辑 TypeScript 源码随本仓库和 0.1.2 安装包提供。
+本版本使用 [MIT License](LICENSE)，保留上游版权声明。QQ-final 和语音模块的 MIT 授权来源见 [第三方声明](THIRD_PARTY_NOTICES.md)。完整可编辑 TypeScript 源码随本仓库和 0.1.2 安装包提供。
 
 ## 源码与开发
 
@@ -52,8 +52,12 @@ npm run build:web
 
 ## 0.1.2 运行条件
 
-文字收发仅需 Cortico 0.2.4、Node.js 22.16+ 和已登录的 OneBot v11 服务（NapCat / SnowLuma）；在面板填地址、Token、监听群与私聊名单。基础依赖 ws 随安装获取。不得同时加载 qq-final 与 QQ ProMAX。
+文字收发仅需 Cortico 0.2.6、Node.js 22.16+ 和已登录的 OneBot v11 服务（NapCat / SnowLuma）；在面板填地址、Token、监听群与私聊名单。基础依赖 ws 随安装获取。不得同时加载 qq-final 与 QQ ProMAX。
 
-预编译 WebUI 已包含。表情包目录默认随用户使用收集，包不附带私人图片。工具按用途合并为 30 个，支持视频附件、语音附件和已有 TTS 音频句柄发送。需要语音时另行安装并启用对应 TTS / ASR 服务；Python 侧车需 Python 与所选引擎运行库（例如 funasr、modelscope、torch、torchaudio，或 sherpa-onnx），模型需自行下载。包不附带音色、模型或电话桥接 EXE。原生通话依赖 Windows 音频设备及兼容桥接，默认不开启。
+预编译 WebUI 已包含。表情包目录默认随用户使用收集，包不附带私人图片。工具按用途合并为 33 个，支持视频附件、语音附件和已有 TTS 音频句柄发送。需要语音时另行安装并启用对应 TTS / ASR 服务；Python 侧车需 Python 与所选引擎运行库（例如 funasr、modelscope、torch、torchaudio，或 sherpa-onnx），模型需自行下载。包不附带音色、模型或电话桥接 EXE。原生通话依赖 Windows 音频设备及兼容桥接，默认不开启。
 
 通用审核可单独安装 cortico-world-speechreview，配置 worlds.qqbot.contentReviewUrl 为 http://127.0.0.1:7795/review；留空时不调用审核服务。填写后审核拒绝或失败会阻止原文发送。空间接口依赖协议端支持；登录、权限及网络需要用户自行准备。
+
+本插件仅连接用户自行部署的 OneBot v11 服务，不附带或自动部署 SnowLuma / QQ 客户端组件。服务与客户端有独立许可；本插件的 AGPL 不授予第三方组件的使用或分发权利。
+
+公开 Cortico 未提供 WorldHost.isPaused 查询时，World 的额外暂停检查不可用；发送与操作前请关闭对应扩展开关，进行中的工具仍通过 AbortSignal 取消。

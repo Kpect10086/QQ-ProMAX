@@ -1,6 +1,86 @@
 {
   "tools": [
     {
+      "name": "qq_forward_by_id",
+      "description": "把本会话中实际接收或发出、本地有记录的消息编号合成一张 QQ 转发卡片，发往群或私聊。编号取消息行首 #编号，不得编造。卡片由 bot 自己发出，逐条标注原发送者昵称和 QQ 号并保留原文、图片和引用，不伪造身份。默认关闭，须先开启「允许按消息 id 原样转发」；协议端须支持 send_forward_msg 和 get_msg，不支持时返回错误。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "to": {
+            "type": "string",
+            "description": "转发目标，原样复制事件 meta 里的 conv 字段。群聊填 \"group:<群号>\"，私聊填 \"private:<QQ号>\"。"
+          },
+          "message_ids": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            },
+            "description": "要合并转发的消息编号数组（即消息行首的 #编号，对应 QQ 真实 message_id）。每条必须在本会话本地记录内存在，否则该条被跳过并提示。多条会合成「一张」合并转发卡片。"
+          }
+        },
+        "required": [
+          "to",
+          "message_ids"
+        ]
+      },
+      "tags": [
+        "speak"
+      ]
+    },
+    {
+      "name": "qq_sticker_to_favorites",
+      "description": "批量把尚未同步的历史表情包补推到登录账号的 QQ 收藏表情。须开启「同步到 QQ 收藏表情」，协议端支持 add_custom_face。新收藏会自动同步，无需重复调用。QQ 数量上限或协议不支持会返回失败；数量超限时可清理 QQ 收藏后重试。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "number",
+            "description": "本次最多补推多少张，默认 50，最大 200。批量失败或量大时可分多次调。"
+          }
+        },
+        "required": []
+      },
+      "tags": [
+        "speak"
+      ]
+    },
+    {
+      "name": "qq_sticker_tag",
+      "description": "修改某张已收藏表情包的标注（情感 emotion / 用处 usage / 短标签 tag / 显示名 label），并持久化保存。\n用途：自动标注不准（如情感写成「未知」）或你想按自己的习惯整理表情库时，用本工具改标注；改完后 qq_sticker_stats 里看到的就是新标注。\n先调 qq_sticker_stats 拿到真实文件名（如 sticker-xxxx.jpg），再调本工具指定要改的字段；只传想改的字段，其余保持不变。文件名也接受 [表情包:sticker-xxxx.jpg] 写法。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "file": {
+            "type": "string",
+            "description": "表情包文件名（来自 qq_sticker_stats），如 sticker-abc123.jpg。"
+          },
+          "emotion": {
+            "type": "string",
+            "description": "可选：新的情感标签（如 开心/撒娇/嘲讽/无奈）。"
+          },
+          "usage": {
+            "type": "string",
+            "description": "可选：新的适用场景（如 回应夸奖/表达无语）。"
+          },
+          "tag": {
+            "type": "string",
+            "description": "可选：新的 2-4 字短标签。"
+          },
+          "label": {
+            "type": "string",
+            "description": "可选：新的显示短名。"
+          }
+        },
+        "required": [
+          "file"
+        ]
+      },
+      "tags": [
+        "write",
+        "read"
+      ]
+    },
+    {
       "name": "qq_send",
       "description": "回复 QQ 消息事件的唯一渠道：发送一条发往 QQ 群或私聊的消息（不要用 terminal_send，那只会发到控制台终端）。调用即直接发送，无需再确认。to 直接填事件 meta 里的 conv 字段：群聊为 \"group:<群号>\"，私聊为 \"private:<QQ号>\"。\n【私聊分流】当对话话题涉及隐私、秘密、尴尬、暧昧、个人账目/健康/情感等不宜在群内公开的内容时，应把回复改为私聊发给当事人，而非发在群里：先在群里说一句\"这个我私聊你～\"，再调用本工具 to=事件 meta 里的 senderPrivate 字段（形如 \"private:<QQ号>\"）把真正的内容私发过去。反之普通闲聊就直接发回当前群即可。 使用前遵守最新 QQ 发送限制：对应回复开关必须开启，静默时须在独立白名单且有新消息待回复，连接就绪。关闭或被拦截后停止试发，等待状态恢复。 发送已合成的 WAV 附件时只填 to、audio_handle；附件必须有可验证的 TTS 合成记录，不会发起通话。",
       "parameters": {

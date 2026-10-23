@@ -161,7 +161,8 @@ export function buildOutgoing(text: string, emojiDir = '', onMissingSticker?: (m
         if (fid === null) segments.push({ type: 'text', data: { text: whole } });
       }
     } else if (m[2] !== undefined) {
-      segments.push({ type: 'at', data: { qq: m[2], name: /^(\d{5,})$/.test(m[2]) ? undefined : m[2] } });
+      if(/^(all|everyone|全体|全体成员)$/i.test(m[2]))segments.push({type:'text',data:{text:m[0]}});
+      else segments.push({ type: 'at', data: { qq: m[2], name: /^(\d{5,})$/.test(m[2]) ? undefined : m[2] } });
     }
     last = re.lastIndex;
   }
