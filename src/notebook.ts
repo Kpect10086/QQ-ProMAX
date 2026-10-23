@@ -1,5 +1,6 @@
 import { join } from 'node:path';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, renameSync, rmSync } from 'node:fs';
+import {randomUUID} from 'node:crypto';
 import type { Logger } from 'cortico/core/types.ts';
 
 /**
@@ -37,7 +38,7 @@ interface MemoryNotebookBridge {
 
 function getBridge(): MemoryNotebookBridge | null {
   const b = (globalThis as Record<string, unknown>)[BRIDGE_KEY];
-  if (b && typeof (b as MemoryNotebookBridge).save === 'function') return b as MemoryNotebookBridge;
+  if (b && ['save', 'list', 'get', 'forget'].every(key => typeof (b as Record<string, unknown>)[key] === 'function')) return b as MemoryNotebookBridge;
   return null;
 }
 
@@ -62,15 +63,29 @@ export class Notebook {
   private loadNative(): NotebookEntry[] {
     try {
       const raw = readFileSync(this.file, 'utf8');
-      return raw.split('\n').filter(Boolean).map((l) => JSON.parse(l) as NotebookEntry);
-    } catch {
-      return [];
+      return raw.split('\n').filter(line => line.trim()).map((line) => {
+        const entry = JSON.parse(line) as NotebookEntry;
+        if (!entry || typeof entry.id !== 'string' || typeof entry.text !== 'string' || !Number.isFinite(entry.ts)) {
+          throw new Error('笔记本条目损坏，保留原文件，未执行写入');
+        }
+        return entry;
+      });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw error;
     }
   }
 
   private saveNative(entries: NotebookEntry[]): void {
     const body = entries.map((e) => JSON.stringify(e)).join('\n') + (entries.length ? '\n' : '');
-    writeFileSync(this.file, body, 'utf8');
+    mkdirSync(this.dataDir || '.', {recursive: true});
+    const temporary = `${this.file}.${randomUUID()}.tmp`;
+    try {
+      writeFileSync(temporary, body, 'utf8');
+      renameSync(temporary, this.file);
+    } finally {
+      rmSync(temporary, {force: true});
+    }
   }
 
   async save(text: string): Promise<{ id: string; backend: string }> {
@@ -100,6 +115,7 @@ export class Notebook {
   async get(id: string): Promise<NotebookEntry | null> {
     const bridge = getBridge();
     if (bridge) {
+      if (!/^\d+$/.test(id) || !Number.isSafeInteger(Number(id))) return null;
       const e = bridge.get(Number(id));
       return e ? { id, text: e.text, ts: e.ts } : null;
     }
@@ -109,6 +125,7 @@ export class Notebook {
   async forget(id: string): Promise<boolean> {
     const bridge = getBridge();
     if (bridge) {
+      if (!/^\d+$/.test(id) || !Number.isSafeInteger(Number(id))) return false;
       return bridge.forget(Number(id));
     }
     const entries = this.loadNative();

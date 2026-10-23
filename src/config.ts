@@ -274,9 +274,9 @@ export interface QQWorldConfig {
   voxcpmSidecar: {
     /** 是否由本扩展自动拉起 voxcpm 侧车子进程（默认 false；仅在确认没有别的进程管理侧车时开启）。 */
     enabled: boolean;
-    /** 虚拟环境（venv）目录绝对路径；空=自动探测。指定后从中推导解释器 <venv>/Scripts/python.exe。 */
+    /** 虚拟环境（venv）目录绝对路径；空=自动探测。指定后从中推导解释器 <venv>/Scripts/python.exe（Windows）或 <venv>/bin/python3、bin/python（Linux）。 */
     venv: string;
-    /** venv_vox 的 python 解释器绝对路径；空=由 venv 推导，再退化为 <vox_tts_server.py 所在目录>/venv_vox/Scripts/python.exe。 */
+    /** venv_vox 的 python 解释器绝对路径；空=由 venv 推导，再退化为 <vox_tts_server.py 所在目录>/venv_vox 下的平台解释器。 */
     python: string;
     /** vox_tts_server.py 绝对路径；本扩展不内置该脚本（来自 fat-fish qq_bot 运行时），请显式指定；空=按"扩展目录向上回溯到 qq_bot / Fat-Fish / feiyu_standalone"这一常见布局相对探测。 */
     script: string;
@@ -284,7 +284,7 @@ export interface QQWorldConfig {
     modelDir: string;
     /** VOXCPM_FFMPEG 路径；空=不设置（侧车自行找 ffmpeg）。 */
     ffmpeg: string;
-    /** 侧车 stdout/stderr 日志文件绝对路径；空=<脚本目录>/vox_tts_server.log。 */
+    /** 侧车 stdout/stderr 日志文件绝对路径；空=优先扩展数据目录，再回退脚本目录。 */
     logFile: string;
     /** 拉起后等待 /health 变 ready（模型加载完）的最长秒数，首启常需 2~4 分钟，默认 240。 */
     startupTimeoutSec: number;
@@ -760,7 +760,7 @@ export const QQ_CALL_GROUP: ConfigGroup = {
     },
     'worlds.qqbot.call.bridgePython': {
       type: 'string', title: '音频桥 Python 解释器', 'x-hot': true,
-      description: '运行 call_bridge.py 的 python 路径（建议指向含 comtypes/pyaudio 的 venv，如 venv_vox/Scripts/python.exe）。留空则自动回溯 venv_vox，再回退 PATH 上的 python。',
+      description: '运行 call_bridge.py 的 python 路径（建议指向含 comtypes/pyaudio 的 venv，如 venv_vox/Scripts/python.exe；Linux 使用 bin/python3 或 bin/python）。留空则自动回溯 venv_vox，再回退 PATH 上的 python。',
     },
     },
   },
@@ -834,12 +834,12 @@ export const QQ_VOXCPM_SIDECAR_GROUP: ConfigGroup = {
     description: 'provider=voxcpm 且本机没有常驻 vox_tts_server.py 时，由本扩展负责拉起独立 venv_vox 子进程（与 fat-fish 主 bot 的 tts_vox 守护二选一，避免重复抢显存）。',
     properties: {
     'worlds.qqbot.voxcpmSidecar.enabled': { type: 'boolean', title: '自动拉起侧车', 'x-hot': true, description: '是否由本扩展自动拉起 voxcpm 侧车子进程。仅在确认没有别的进程管理侧车时开启，否则会与其它拉起者抢显存/端口。' },
-    'worlds.qqbot.voxcpmSidecar.python': { type: 'string', title: 'Python 解释器', 'x-hot': true, description: 'venv_vox 的 python 解释器绝对路径；留空=由"虚拟环境目录"推导，再退化为 <vox_tts_server.py 所在目录>/venv_vox/Scripts/python.exe。' },
-    'worlds.qqbot.voxcpmSidecar.venv': { type: 'string', title: '虚拟环境目录', 'x-hot': true, description: '虚拟环境（venv）目录绝对路径。指定后从中推导 <venv>/Scripts/python.exe 来拉起侧车；留空则自动探测 <扩展>/venv_vox 或 <扩展>/venv。' },
+    'worlds.qqbot.voxcpmSidecar.python': { type: 'string', title: 'Python 解释器', 'x-hot': true, description: 'venv_vox 的 python 解释器绝对路径；留空=由"虚拟环境目录"推导，再退化为 <vox_tts_server.py 所在目录>/venv_vox 下的平台解释器。' },
+    'worlds.qqbot.voxcpmSidecar.venv': { type: 'string', title: '虚拟环境目录', 'x-hot': true, description: '虚拟环境（venv）目录绝对路径。指定后从中推导 <venv>/Scripts/python.exe（Windows）或 <venv>/bin/python3、bin/python（Linux） 来拉起侧车；留空则自动探测 <扩展>/venv_vox 或 <扩展>/venv。' },
     'worlds.qqbot.voxcpmSidecar.script': { type: 'string', title: '侧车脚本', 'x-hot': true, description: 'vox_tts_server.py 绝对路径；本扩展不内置该脚本（来自 fat-fish qq_bot 运行时），请显式指定；留空=按"扩展目录向上回溯到 qq_bot / Fat-Fish / feiyu_standalone"这一常见布局相对探测。' },
     'worlds.qqbot.voxcpmSidecar.modelDir': { type: 'string', title: '权重目录', 'x-hot': true, description: 'VOXCPM 权重目录（model.safetensors 所在）；留空=优先进程环境变量 VOXCPM_MODEL_DIR，否则 <脚本目录>/models/VoxCPM2。' },
     'worlds.qqbot.voxcpmSidecar.ffmpeg': { type: 'string', title: 'FFmpeg 路径', 'x-hot': true, description: 'VOXCPM_FFMPEG 路径；留空=不设置（侧车自行找 ffmpeg）。' },
-    'worlds.qqbot.voxcpmSidecar.logFile': { type: 'string', title: '日志文件', 'x-hot': true, description: '侧车 stdout/stderr 日志文件绝对路径；留空=<脚本目录>/vox_tts_server.log。' },
+    'worlds.qqbot.voxcpmSidecar.logFile': { type: 'string', title: '日志文件', 'x-hot': true, description: '侧车 stdout/stderr 日志文件绝对路径；留空时优先使用扩展数据目录下的 vox_tts_server.log，没有数据目录时回退脚本目录。' },
     'worlds.qqbot.voxcpmSidecar.startupTimeoutSec': { type: 'integer', title: '启动等待(秒)', minimum: 0, maximum: 1800, 'x-hot': true, description: '拉起后等待 /health 变 ready（模型加载完）的最长秒数，首启常需 2~4 分钟，默认 240。' },
     },
   },

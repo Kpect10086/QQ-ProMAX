@@ -71,9 +71,11 @@ export class HttpRecognizer implements Recognizer {
       });
       if (!r.ok) return { text: '', ms: Date.now() - t0, error: `ASR HTTP ${r.status}` };
       let text = '';
+      const raw = await r.text();
       try {
-        const j = (await r.json().catch(() => null)) as Record<string, unknown> | null;
-        if (j && typeof j === 'object') {
+        const j = JSON.parse(raw) as Record<string, unknown> | string | null;
+        if (typeof j === 'string') text = j;
+        else if (j && typeof j === 'object') {
           text =
             (typeof j.text === 'string' && j.text) ||
             (j.data && typeof j.data === 'object' && typeof (j.data as Record<string, unknown>).text === 'string'
@@ -81,11 +83,14 @@ export class HttpRecognizer implements Recognizer {
               : '') ||
             '';
           if (!text && Array.isArray(j.results)) {
-            text = (j.results as { text?: string }[]).map((x) => x.text || '').join('');
+            text = j.results.map((x) => typeof x?.text === 'string' ? x.text : '').join('');
           }
         }
       } catch {
-        text = (await r.text()).trim();
+        if (r.headers.get('content-type')?.includes('json')) {
+          return {text: '', ms: Date.now() - t0, error: 'ASR invalid JSON'};
+        }
+        text = raw.trim();
       }
       text = (text || '').trim();
       return { text, ms: Date.now() - t0, error: looksHallucinated(text) ? 'hallucination' : null };

@@ -3,7 +3,9 @@ type WorldHost = FrameworkWorldHost & {isPaused?():boolean};
 const toolError = (error: string) => ({failed:true as const,text:error,error});
 import { spawn, type ChildProcess } from 'node:child_process';
 import {createHash, randomBytes} from 'node:crypto';
-import { existsSync, readFileSync, writeFileSync, readdirSync, openSync, mkdirSync, renameSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, readdirSync, mkdirSync, renameSync, statSync } from 'node:fs';
+import {venvPython, findVenvPython} from './platform.ts';
+import {spawnLoggedProcess} from './sidecar-process.ts';
 import { createConnection } from 'node:net';
 import { type BlobInput, type EventEnvelope, type Logger, type PromptDocDecl, type ToolDef, type ToolSpec, type ToolCallContext, type World, type WorldWebUiDecl, type WorldHost as FrameworkWorldHost, type WorldLamp, type WorldPanelDecl, type WorldStreamSocket } from 'cortico/core/types.ts';
 
@@ -99,6 +101,7 @@ function buildFfmpegCandidates(configPath: string, packageDir: string): string[]
   out.push('ffmpeg');
   if (packageDir) {
     const bin = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
+    out.push(join(packageDir, 'node_modules', 'ffmpeg-static', bin));
     out.push(join(packageDir, '..', 'node_modules', 'ffmpeg-static', bin));
   }
   return out;
@@ -2828,12 +2831,16 @@ private async pushStickerToQQFavorites(bytes: Uint8Array, ext: string): Promise<
     // 2) 解析脚本与 python：优先用 call.bridgeScript / call.bridgePython（部署可配置）；
     //    未配置则按"扩展目录向上回溯"在常见布局里自动找（不写死任何机器绝对路径，发布版干净）。
     const cfg = this.config.call;
+    if (process.platform !== 'win32' && !cfg.bridgeScript?.trim()) {
+      this.log.warn('[audio-bridge] 内置自动探测仅适用于 Windows 原生电话；Linux 请使用语音消息，或配置并启动兼容的外部 bridgeUrl');
+      return false;
+    }
     const script = (cfg.bridgeScript && cfg.bridgeScript.trim()) || this.findBridgeScript();
     if (!script) {
       this.log.warn('[audio-bridge] 未配置 call.bridgeScript 且未自动找到 call_bridge.py，跳过自动拉起；请在 call.bridgeScript 指定脚本路径或手动启动桥');
       return false;
     }
-    const python = (cfg.bridgePython && cfg.bridgePython.trim()) || this.findBridgePython() || 'python';
+    const python = (cfg.bridgePython && cfg.bridgePython.trim()) || this.findBridgePython() || (process.platform === 'win32' ? 'python' : 'python3');
     // 3) 端口若被占用（旧桥僵尸）则放弃，避免重复拉起抢占
     try {
       if (await this.portInUse('127.0.0.1', 8799)) {
@@ -2843,16 +2850,13 @@ private async pushStickerToQQFavorites(bytes: Uint8Array, ext: string): Promise<
     } catch { /* ignore */ }
     // 4) 拉起（detached + unref：Cortico 重启后桥仍可服务；崩溃后下次通话由 ensure 自愈）
     try {
-      const logFile = join(dirname(script), 'call_bridge.log');
-      const logf = openSync(logFile, 'a');
-      this.audioBridgeProc = spawn(python, [script], {
+      const logFile = join(this.dataDir || dirname(script), 'call_bridge.log');
+      this.audioBridgeProc = await spawnLoggedProcess(python, [script], {
         cwd: dirname(script),
         env: { ...process.env },
-        stdio: ['ignore', logf, logf],
-        detached: true,
-        windowsHide: true,
+        logFile,
+        onError: error => this.log.warn('[audio-bridge] 子进程错误', {err: String(error)}),
       });
-      this.audioBridgeProc.unref();
       this.log.info('[audio-bridge] 已拉起', { script, pid: this.audioBridgeProc.pid });
     } catch (e) {
       this.log.warn('[audio-bridge] 拉起失败', { err: String(e) });
@@ -2890,8 +2894,8 @@ private async pushStickerToQQFavorites(bytes: Uint8Array, ext: string): Promise<
   private findBridgePython(): string {
     let dir = this.packageDir;
     for (let i = 0; i < 6; i++) {
-      for (const rel of ['venv_vox/Scripts/python.exe', 'audio_bridge_poc/venv_vox/Scripts/python.exe', 'venv/Scripts/python.exe']) {
-        const p = join(dir, ...rel.split('/'));
+      for (const rel of ['venv_vox', 'audio_bridge_poc/venv_vox', 'venv']) {
+        const p = venvPython(join(dir, ...rel.split('/')));
         if (existsSync(p)) return p;
       }
       const parent = dirname(dir);
@@ -3099,16 +3103,16 @@ private async pushStickerToQQFavorites(bytes: Uint8Array, ext: string): Promise<
     // 解释器优先级：显式 python > 显式 venv 推导 > 脚本目录/上级目录下的 venv_vox/venv
     let python = (cfg.python || '').trim();
     if (!python && cfg.venv && cfg.venv.trim()) {
-      python = join(cfg.venv.trim(), 'Scripts', 'python.exe');
+      python = venvPython(cfg.venv.trim());
     }
     if (!python) {
       const venvCands = [
-        join(scriptDir, 'venv_vox', 'Scripts', 'python.exe'),
-        join(scriptDir, 'venv', 'Scripts', 'python.exe'),
-        join(scriptDir, '..', 'venv_vox', 'Scripts', 'python.exe'),
-        join(scriptDir, '..', '..', 'venv_vox', 'Scripts', 'python.exe'),
+        join(scriptDir, 'venv_vox'),
+        join(scriptDir, 'venv'),
+        join(scriptDir, '..', 'venv_vox'),
+        join(scriptDir, '..', '..', 'venv_vox'),
       ];
-      python = venvCands.find((c) => existsSync(c)) || join(scriptDir, 'venv_vox', 'Scripts', 'python.exe');
+      python = findVenvPython(venvCands) || venvPython(join(scriptDir, 'venv_vox'));
     }
     if (!existsSync(python)) {
       this.log.warn('[voxcpm-sidecar] 未找到 python 解释器：' + python + '（可在 worlds.qqbot.voxcpmSidecar.venv / .python 指定）');
@@ -3132,7 +3136,7 @@ private async pushStickerToQQFavorites(bytes: Uint8Array, ext: string): Promise<
     if (!ffmpeg) {
       ffmpeg = '';
     }
-    const logFile = (cfg.logFile || '').trim() || join(scriptDir, 'vox_tts_server.log');
+    const logFile = (cfg.logFile || '').trim() || join(this.dataDir || scriptDir, 'vox_tts_server.log');
     return { python, script, modelDir, ffmpeg, logFile };
   }
 
@@ -3154,22 +3158,20 @@ private async pushStickerToQQFavorites(bytes: Uint8Array, ext: string): Promise<
       return false;
     }
     try {
-      const logf = openSync(info.logFile, 'a');
       const env = { ...process.env } as Record<string, string>;
       if (info.ffmpeg) env.VOXCPM_FFMPEG = info.ffmpeg;
       env.VOXCPM_MODEL_DIR = info.modelDir;
-      this.sidecarProc = spawn(info.python, [info.script, String(port), host], {
+      this.sidecarProc = await spawnLoggedProcess(info.python, [info.script, String(port), host], {
         cwd: dirname(info.script),
         env,
-        stdio: ['ignore', logf, logf],
-        detached: true,
-        windowsHide: true,
+        logFile: info.logFile,
+        onError: error => this.log.warn('[voxcpm-sidecar] 子进程错误：' + String(error)),
       });
       this.sidecarLaunchedAt = Date.now();
-      this.sidecarProc.unref();
+      const launchedProcess = this.sidecarProc;
       this.sidecarProc.on('exit', (code, sig) => {
         this.log.warn(`[voxcpm-sidecar] 子进程退出 code=${code} signal=${sig}`);
-        if (this.sidecarProc && this.sidecarProc.exitCode !== null) this.sidecarProc = null;
+        if (this.sidecarProc === launchedProcess) this.sidecarProc = null;
       });
       this.log.warn(`[voxcpm-sidecar] 已拉起 vox_tts_server.py (pid=${this.sidecarProc.pid})，正在加载模型，等待 /health ready…`);
       return true;
@@ -3228,19 +3230,7 @@ private async pushStickerToQQFavorites(bytes: Uint8Array, ext: string): Promise<
       return null;
     }
     // venv：显式配置 > 包相对探测（<扩展>/venv_vox 或 <扩展>/venv），不写死任何机器路径
-    let python = '';
-    const venv = (asr.localVenv || '').trim();
-    if (venv) {
-      python = join(venv, 'Scripts', 'python.exe');
-    } else {
-      const cands = [
-        join(EXT_ROOT, 'venv_vox', 'Scripts', 'python.exe'),
-        join(EXT_ROOT, 'venv', 'Scripts', 'python.exe'),
-        join(this.packageDir, 'venv_vox', 'Scripts', 'python.exe'),
-        join(this.packageDir, 'venv', 'Scripts', 'python.exe'),
-      ];
-      python = cands.find((c) => existsSync(c)) || join(EXT_ROOT, 'venv_vox', 'Scripts', 'python.exe');
-    }
+    const python = this.resolveAsrPython();
     if (!existsSync(python)) {
       this.log.warn('[asr-sidecar] 未找到 python 解释器：' + python + '（请在 asr.localVenv 配置 venv 目录，或把 venv 放到 <扩展>/venv_vox）');
       return null;
@@ -3285,23 +3275,21 @@ private async pushStickerToQQFavorites(bytes: Uint8Array, ext: string): Promise<
       return false;
     }
     try {
-      const logFile = join(dirname(info.script), 'asr_sidecar.log');
-      const logf = openSync(logFile, 'a');
-      this.asrSidecar = spawn(
+      const logFile = join(this.dataDir || dirname(info.script), 'asr_sidecar.log');
+      this.asrSidecar = await spawnLoggedProcess(
         info.python,
         [info.script, String(port), '--engine', info.engine, '--model-dir', info.modelPath],
         {
           cwd: dirname(info.script),
           env: { ...process.env } as Record<string, string>,
-          stdio: ['ignore', logf, logf],
-          detached: true,
-          windowsHide: true,
+          logFile,
+          onError: error => this.log.warn('[asr-sidecar] 子进程错误：' + String(error)),
         },
       );
-      this.asrSidecar.unref();
+      const launchedProcess = this.asrSidecar;
       this.asrSidecar.on('exit', (code, sig) => {
         this.log.warn(`[asr-sidecar] 子进程退出 code=${code} signal=${sig}`);
-        if (this.asrSidecar && this.asrSidecar.exitCode !== null) this.asrSidecar = null;
+        if (this.asrSidecar === launchedProcess) this.asrSidecar = null;
       });
       this.log.warn(`[asr-sidecar] 已拉起 asr_sidecar.py (pid=${this.asrSidecar.pid})，加载模型中，等待 /health ready…`);
       return true;
@@ -4822,6 +4810,7 @@ const forwardById: ToolDef = {
   }
 
   private async downloadAsrModel(): Promise<unknown> {
+    if (this.asrDownload?.phase === 'working') return {ok: true, started: false};
     const asr = this.config.asr || {};
     const engine = (asr.localEngine || 'funasr').toLowerCase();
     if (engine !== 'sherpaonnx') {
@@ -4833,27 +4822,31 @@ const forwardById: ToolDef = {
     return { ok: true, started: true };
   }
 
+  private resolveAsrPython(): string {
+    const venv = this.config.asr.localVenv?.trim();
+    if (venv) return venvPython(venv);
+    if (process.env.QQBOT_ASR_PYTHON?.trim()) return process.env.QQBOT_ASR_PYTHON.trim();
+    if (process.env.QQBOT_ASR_VENV?.trim()) return venvPython(process.env.QQBOT_ASR_VENV.trim());
+    return findVenvPython([
+      join(EXT_ROOT, 'venv_vox'), join(EXT_ROOT, 'venv'),
+      join(this.packageDir, 'venv_vox'), join(this.packageDir, 'venv'),
+    ]);
+  }
+
   private async runAsrDownload(target: string): Promise<void> {
-    const asr = this.config.asr || {};
-    let python = process.env.QQBOT_ASR_PYTHON || '';
-    const venvCands = [asr.localVenv, process.env.QQBOT_ASR_VENV, join(this.packageDir, 'venv_vox')].filter(Boolean) as string[];
-    for (const v of venvCands) {
-      const cand = join(v, 'Scripts', 'python.exe');
-      if (existsSync(cand)) { python = cand; break; }
-    }
+    const python = this.resolveAsrPython();
     if (!python) {
       if (this.asrDownload) { this.asrDownload.phase = 'error'; this.asrDownload.detail = '找不到 python（venv 未配置）'; }
       return;
     }
-    const targetPy = target.replace(/\\/g, '\\\\');
     const script = [
-      'import os',
+      'import os, sys',
       "os.environ['CUDA_VISIBLE_DEVICES'] = '-1'",
       'from modelscope import snapshot_download',
-      "p = snapshot_download('xiaowangge/sherpa-onnx-sense-voice-small', allow_patterns=['model_q8.onnx','tokens.txt','config.json'], local_dir=r'" + targetPy + "')",
+      "p = snapshot_download('xiaowangge/sherpa-onnx-sense-voice-small', allow_patterns=['model_q8.onnx','tokens.txt','config.json'], local_dir=sys.argv[1])",
       "print('DOWNLOADED', p)",
     ].join('\n');
-    const child = spawn(python, ['-c', script], { cwd: this.packageDir });
+    const child = spawn(python, ['-c', script, target], { cwd: this.packageDir, windowsHide: true });
     child.stdout?.on('data', (d: Buffer) => { if (this.asrDownload) this.asrDownload.log.push(d.toString()); });
     child.stderr?.on('data', (d: Buffer) => { if (this.asrDownload) this.asrDownload.log.push(d.toString()); });
     await new Promise<void>((resolve) => {

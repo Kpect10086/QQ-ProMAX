@@ -95,32 +95,39 @@ def load_engine(engine: str, model_dir: str) -> None:
 def read_wav_pcm(data: bytes):
     """解析 WAV → (rate, channels, pcm_int16_bytes)。仅处理 16-bit PCM；非 WAV 按裸 16-bit/16k/单声道处理。"""
     if data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+        if len(data) % 2:
+            raise ValueError("Raw PCM must contain complete 16-bit samples")
         return 16000, 1, data
     import struct
 
-    import numpy as np
-
     p = 12
-    rate = 16000
-    channels = 1
-    bits = 16
-    pcm = b""
-    while p + 8 <= len(data):
+    end = struct.unpack("<I", data[4:8])[0] + 8
+    if end > len(data) or end < 12:
+        raise ValueError("Truncated WAV container")
+    rate = channels = bits = None
+    chunks = []
+    while p + 8 <= end:
         cid = data[p : p + 4]
         sz = struct.unpack("<I", data[p + 4 : p + 8])[0]
         p += 8
+        if p + sz > end:
+            raise ValueError("Truncated WAV chunk")
         if cid == b"fmt ":
-            fmt = struct.unpack("<H", data[p : p + 2])[0]
-            channels = struct.unpack("<H", data[p + 2 : p + 4])[0]
-            rate = struct.unpack("<I", data[p + 4 : p + 8])[0]
-            bits = struct.unpack("<H", data[p + 14 : p + 16])[0]
-            p += sz
+            if sz < 16:
+                raise ValueError("Invalid WAV format chunk")
+            fmt, channels, rate, _, align, bits = struct.unpack("<HHIIHH", data[p : p + 16])
+            if fmt != 1 or bits != 16 or channels < 1 or rate < 1 or align != channels * 2:
+                raise ValueError("Only 16-bit PCM WAV audio is supported")
         elif cid == b"data":
-            pcm = data[p : p + sz]
-            p += sz
-        else:
-            p += sz
-    if bits != 16 or channels != 1 or rate != 16000:
+            chunks.append(data[p : p + sz])
+        # RIFF chunks are word-aligned; their declared size excludes padding.
+        p += sz + (sz % 2)
+    pcm = b"".join(chunks)
+    if channels is None or not pcm or len(pcm) % (channels * 2):
+        raise ValueError("Missing or incomplete WAV audio frames")
+    if channels != 1 or rate != 16000:
+        import numpy as np
+
         arr = np.frombuffer(pcm, dtype="<i2").astype(np.float32)
         if channels > 1:
             arr = arr.reshape(-1, channels).mean(axis=1)
@@ -137,9 +144,11 @@ def transcribe(data: bytes, model: str) -> str:
         Model, KaldiRecognizer, m = ENGINE
         _, _, pcm = read_wav_pcm(data)
         rec = KaldiRecognizer(m, 16000)
-        rec.AcceptWaveform(pcm)
-        res = json.loads(rec.Result())
-        return (res.get("text") or "").strip()
+        text = []
+        if rec.AcceptWaveform(pcm):
+            text.append(json.loads(rec.Result()).get("text") or "")
+        text.append(json.loads(rec.FinalResult()).get("text") or "")
+        return " ".join(part.strip() for part in text if part.strip())
     elif ENGINE_NAME == "funasr":
         import re
         import tempfile
@@ -193,27 +202,23 @@ def transcribe(data: bytes, model: str) -> str:
 
 
 def parse_multipart(body: bytes, boundary: bytes):
-    """极简 multipart/form-data 解析：返回 {field_name: bytes}。"""
+    """Parse MIME boundaries without trimming binary audio payload bytes."""
+    from email.parser import BytesParser
+    from email.policy import default
+
+    if not boundary or any(char in boundary for char in (b"\r", b"\n")):
+        raise ValueError("Invalid multipart boundary")
+    quoted = boundary.replace(b"\\", b"\\\\").replace(b'"', b'\\"')
+    message = BytesParser(policy=default).parsebytes(
+        b'Content-Type: multipart/form-data; boundary="' + quoted + b'"\r\nMIME-Version: 1.0\r\n\r\n' + body
+    )
+    if not message.is_multipart():
+        raise ValueError("Invalid multipart body")
     parts: dict[str, bytes] = {}
-    for part in body.split(b"--" + boundary):
-        part = part.strip(b"\r\n")
-        if not part or part in (b"--",):
-            continue
-        hend = part.find(b"\r\n\r\n")
-        if hend < 0:
-            continue
-        headers = part[:hend].decode("utf-8", "ignore")
-        content = part[hend + 4:]
-        if content.endswith(b"\r\n"):
-            content = content[:-2]
-        name = None
-        for line in headers.split("\r\n"):
-            if line.lower().startswith("content-disposition"):
-                for kv in line.split(";"):
-                    kv = kv.strip()
-                    if kv.lower().startswith("name="):
-                        name = kv[5:].strip().strip('"')
-        if name:
+    for part in message.iter_parts():
+        name = part.get_param("name", header="content-disposition")
+        content = part.get_payload(decode=True)
+        if isinstance(name, str) and isinstance(content, bytes):
             parts[name] = content
     return parts
 
@@ -248,16 +253,21 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             length = int(self.headers.get("Content-Length", 0) or 0)
+            if length <= 0:
+                raise ValueError("Invalid content length")
             body = self.rfile.read(length)
         except Exception:
             self._send(400, {"error": "bad request"})
             return
-        ctype = self.headers.get("Content-Type", "")
         audio = None
         model = ""
-        if "multipart/form-data" in ctype:
-            bnd = ctype.split("boundary=")[-1].strip().strip('"').encode("utf-8")
-            parts = parse_multipart(body, bnd)
+        if self.headers.get_content_type() == "multipart/form-data":
+            try:
+                bnd = (self.headers.get_param("boundary") or "").encode("utf-8")
+                parts = parse_multipart(body, bnd)
+            except (ValueError, UnicodeError):
+                self._send(400, {"error": "invalid multipart body"})
+                return
             audio = parts.get("file")
             model = (parts.get("model") or b"").decode("utf-8", "ignore")
         else:
@@ -271,6 +281,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             text = transcribe(audio, model)
             self._send(200, {"text": text})
+        except ValueError as e:
+            self._send(400, {"error": str(e)})
         except Exception as e:  # noqa
             self._send(500, {"error": str(e), "trace": traceback.format_exc()})
 

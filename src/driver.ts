@@ -7,6 +7,7 @@ interface PendingCall {
   reject: (e: Error) => void;
   timer: NodeJS.Timeout;
   action: string;
+  socket: WS;
 }
 
 export interface DriverOptions {
@@ -47,11 +48,18 @@ export class OneBotDriver {
   }
 
   async start(): Promise<void> {
-    if (this.opts.mode === 'reverse') {
-      this.assertReverseListenerIsSafe();
-      await this.startReverse();
-    } else {
-      await this.startForward();
+    if (this.server || this.client || this.reconnectTimer) throw new Error('OneBot driver 已启动');
+    this.stopped = false;
+    try {
+      if (this.opts.mode === 'reverse') {
+        this.assertReverseListenerIsSafe();
+        await this.startReverse();
+      } else {
+        await this.startForward();
+      }
+    } catch (error) {
+      await this.stop();
+      throw error;
     }
   }
 
@@ -81,7 +89,7 @@ export class OneBotDriver {
       const { wsHost, wsPort, wsPath } = this.opts;
       let server: WebSocketServer;
       try {
-        server = new WebSocketServer({ host: wsHost, port: wsPort, path: wsPath || undefined });
+        server = new WebSocketServer({ host: wsHost.trim() || '127.0.0.1', port: wsPort, path: wsPath || undefined });
       } catch (e) {
         reject(e as Error);
         return;
@@ -126,7 +134,8 @@ export class OneBotDriver {
   }
 
   private onClientConnect(socket: WS, req: { url?: string; headers?: Record<string, unknown> }): void {
-    const url = req.url ?? '';
+    if (this.stopped) {socket.terminate(); return;}
+    const url = (req.url ?? '').split('?')[0];
     const token = this.extractToken(req);
     if (this.opts.token && token !== this.opts.token) {
       // 只记「有没有带」而不回显实际值，避免日志泄露可用的凭据
@@ -138,6 +147,7 @@ export class OneBotDriver {
     // 攻击者只要抢先重连就能截获后续全部消息。原实现是直接覆盖 active。
     if (this.active && this.active !== socket) {
       this.opts.log.warn('新的反向连接接入，踢掉先前那条', { url });
+      this.rejectSocketCalls(this.active);
       try {
         this.active.close(1008, 'replaced by a newer connection');
       } catch {
@@ -149,15 +159,15 @@ export class OneBotDriver {
     this.active = socket;
     this.opts.log.info('NapCat 已反向连入', { total: this.sockets.size });
     this.opts.onConnectionChange?.(true);
-    socket.on('message', (data) => this.onFrame(data.toString()));
+    socket.on('message', (data) => { if (this.active === socket) this.onFrame(data.toString(), socket); });
     socket.on('close', () => {
+      this.rejectSocketCalls(socket);
       this.sockets.delete(socket);
       if (this.active === socket) this.active = this.sockets.size ? Array.from(this.sockets).pop() ?? null : null;
       this.opts.log.info('NapCat 连接断开', { remaining: this.sockets.size });
       if (this.sockets.size === 0) this.opts.onConnectionChange?.(false);
     });
     socket.on('error', (err) => this.opts.log.warn('socket 错误', { err: String(err) }));
-    void this.refreshIdentity();
   }
 
   /**
@@ -170,15 +180,15 @@ export class OneBotDriver {
   }
 
   private connectForward(): void {
-    if (this.stopped) return;
-    let url = this.opts.wsUrl;
-    if (this.opts.token && !/access_token=/.test(url)) {
-      const sep = url.includes('?') ? '&' : '?';
-      url = `${url}${sep}access_token=${encodeURIComponent(this.opts.token)}`;
-    }
-    const client = new WebSocket(url);
+    if (this.stopped || this.client) return;
+    const url = new URL(this.opts.wsUrl);
+    if (this.opts.token) url.searchParams.set('access_token', this.opts.token);
+    const client = new WebSocket(url, {
+      headers: this.opts.token ? {Authorization: `Bearer ${this.opts.token}`} : undefined,
+    });
     this.client = client;
-    const onOpen = () => {
+    client.once('open', () => {
+      if (this.stopped || this.client !== client) {client.terminate(); return;}
       this.sockets.add(client);
       this.active = client;
       this.reconnectDelay = 1000; // 连上成功，重置退避
@@ -186,30 +196,33 @@ export class OneBotDriver {
         clearTimeout(this.reconnectTimer);
         this.reconnectTimer = undefined;
       }
-      this.opts.log.info('已正向连入 NapCat', { url });
+      this.opts.log.info('已正向连入 NapCat', { url: `${url.protocol}//${url.host}${url.pathname}` });
       this.opts.onConnectionChange?.(true);
-      client.on('message', (data) => this.onFrame(data.toString()));
-      client.on('close', () => {
-        this.sockets.delete(client);
-        if (this.active === client) this.active = null;
-        this.opts.log.warn('NapCat 连接关闭，将重连', {});
-        if (this.sockets.size === 0) this.opts.onConnectionChange?.(false);
-        this.client = null;
-        this.scheduleReconnect();
-      });
-      client.on('error', (err) => this.opts.log.warn('正向连接错误', { err: String(err) }));
-      void this.refreshIdentity();
-    };
-    client.on('open', onOpen);
-    client.on('error', (err) => {
-      this.opts.log.error('正向连接失败，将重连', { err: String(err) });
+    });
+    client.on('message', (data) => { if (this.active === client) this.onFrame(data.toString(), client); });
+    // Handle close before and after the handshake. Only this socket may release its
+    // ownership; delayed events from a stopped session must not clear its successor.
+    client.once('close', () => {
+      this.rejectSocketCalls(client);
+      this.sockets.delete(client);
+      const wasActive = this.active === client;
+      if (wasActive) this.active = null;
+      if (this.client !== client) return;
       this.client = null;
+      if (this.stopped) return;
+      this.opts.log.warn('NapCat 连接关闭，将重连', {});
+      if (wasActive && this.sockets.size === 0) this.opts.onConnectionChange?.(false);
       this.scheduleReconnect();
+    });
+    client.on('error', (err) => {
+      if (this.stopped || this.client !== client) return;
+      this.opts.log.error('正向连接失败，将重连', { err: String(err) });
+      // ws emits close after an error. Reconnect there, once, after ownership ends.
     });
   }
 
   private scheduleReconnect(): void {
-    if (this.stopped || this.reconnectTimer) return;
+    if (this.stopped || this.reconnectTimer || this.client) return;
     const delay = this.reconnectDelay;
     this.reconnectDelay = Math.min(this.reconnectDelay * 2, 30_000);
     this.opts.log.info('正向连接重连排程', { delayMs: delay });
@@ -219,19 +232,29 @@ export class OneBotDriver {
     }, delay);
   }
 
-  private onFrame(raw: string): void {
+  private rejectSocketCalls(socket: WS): void {
+    for (const [echo, call] of this.pending) {
+      if (call.socket !== socket) continue;
+      clearTimeout(call.timer);
+      this.pending.delete(echo);
+      call.reject(new Error(`API ${call.action} 连接已断开，结果未知；请先查询再决定是否重试`));
+    }
+  }
+
+  private onFrame(raw: string, socket: WS): void {
     let msg: OneBotMessage;
     try {
       msg = JSON.parse(raw);
     } catch {
       return;
     }
+    if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return;
     if (msg.echo !== undefined) {
       const pending = this.pending.get(String(msg.echo));
-      if (pending) {
+      if (pending && pending.socket === socket) {
         clearTimeout(pending.timer);
         this.pending.delete(String(msg.echo));
-        if (msg.status === 'failed') {
+        if (msg.status === 'failed' || (msg.retcode !== undefined && msg.retcode !== 0 && !(msg.status === 'async' && msg.retcode === 1))) {
           const detail = `[OneBot API 失败] action=${pending.action} retcode=${msg.retcode ?? '?'} message=${msg.message !== undefined ? String(msg.message) : '(空)'} data=${JSON.stringify(msg.data ?? null)}`;
           pending.reject(new Error(detail));
         } else {
@@ -264,9 +287,14 @@ export class OneBotDriver {
         this.pending.delete(echo);
         reject(new Error(`API ${action} 超时`));
       }, 30000);
-      this.pending.set(echo, { resolve: resolve as (v: unknown) => void, reject, timer, action });
+      this.pending.set(echo, { resolve: resolve as (v: unknown) => void, reject, timer, action, socket });
       try {
-        socket.send(JSON.stringify(payload));
+        socket.send(JSON.stringify(payload), error => {
+          if (!error || !this.pending.has(echo)) return;
+          clearTimeout(timer);
+          this.pending.delete(echo);
+          reject(error);
+        });
       } catch (e) {
         clearTimeout(timer);
         this.pending.delete(echo);
@@ -365,7 +393,7 @@ export class OneBotDriver {
     this.pending.clear();
     for (const s of this.sockets) {
       try {
-        s.close();
+        s.terminate();
       } catch {
         /* ignore */
       }
@@ -373,12 +401,13 @@ export class OneBotDriver {
     this.sockets.clear();
     this.active = null;
     if (this.client) {
+      const client = this.client;
+      this.client = null;
       try {
-        this.client.close();
+        client.terminate();
       } catch {
         /* ignore */
       }
-      this.client = null;
     }
     if (this.server) {
       await new Promise<void>((resolve) => {

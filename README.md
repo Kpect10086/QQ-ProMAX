@@ -32,7 +32,7 @@ QQ 空间默认关闭，开启后依赖协议端支持对应扩展接口。qq_qz
 
 ## 许可证
 
-本版本使用 [MIT License](LICENSE)，保留上游版权声明。QQ-final 和语音模块的 MIT 授权来源见 [第三方声明](THIRD_PARTY_NOTICES.md)。完整可编辑 TypeScript 源码随本仓库和 0.1.2 安装包提供。
+本版本使用 [AGPL-3.0-or-later](LICENSE)，与 package.json 和当前上游声明一致；旧版 MIT 来源及版权声明继续保留，见 [第三方声明](THIRD_PARTY_NOTICES.md) 和 LICENSE-MIT。完整可编辑 TypeScript 源码随本仓库提供。
 
 ## 源码与开发
 
@@ -40,15 +40,30 @@ QQ 空间默认关闭，开启后依赖协议端支持对应扩展接口。qq_qz
 - npm：[cortico-world-qq-promax](https://www.npmjs.com/package/cortico-world-qq-promax)
 - 0.1.2 已移除桌宠、桌宠内置电脑操控、Electron 窗口与形象资源。升级时请使用 0.1.2 或更新版本。
 
-使用 Windows 和 Node.js 22.13.0 或更新版本：
+支持 Windows、Linux，运行时需要 Node.js 22.16.0+；开发与 CI 使用 Node.js 22.22.2+ 或 24.15.0+（锁定的开发依赖要求更高补丁版本）：
 
 ```sh
 npm ci
 npm test
+npm run typecheck
 npm run build:web
 ```
 
 在 Cortico 扩展页选择本机目录可加载检出的源码。修改前端后重新运行 build:web，修改 TypeScript 后重启已有 Cortico。
+
+## Linux 部署
+
+1. 安装上述 Node.js 版本和 Cortico 0.2.6，检出本仓库后执行上面的开发命令，再在 Cortico 扩展页选择这个目录。
+2. 单独启动已经登录的 NapCat / 兼容 OneBot v11 服务。在「连接与监听」填写可从 Cortico 所在主机访问的 WebSocket 地址、Token 和监听名单；Docker 内的 `127.0.0.1` 指该容器自身。
+3. 先关闭语音和原生电话，用一个列入白名单的 QQ 号验证接收、回复、重连。群聊、私聊、图片、历史、空间与普通语音消息不依赖 Windows 桌面；空间仍要求协议端支持相应扩展接口。
+4. 需要本地 ASR 时，以有写权限的目录创建 Python venv，并按所选引擎安装依赖，例如 `python3 -m venv /your/path/venv_vox`。把绝对目录填入 `asr.localVenv`，设置模型目录及 `asr.mode=local`。Linux 自动识别 `bin/python3` / `bin/python`；Windows 继续使用 `Scripts/python.exe`。也可用 `QQBOT_ASR_PYTHON` 指定解释器绝对路径，或用 `QQBOT_ASR_VENV` 指定 venv；面板中的 `asr.localVenv` 优先。
+5. 视频抽帧与普通音频解码需 FFmpeg，可放到 PATH 或填写 `asr.ffmpegPath`。TTS 侧车需自行提供兼容服务脚本、Python 环境与模型，`voxcpmSidecar.venv` 同样支持 Linux 布局。
+
+`call.mode=system` 的 Windows WASAPI/CABLE/可访问控件音频桥不随本包提供，也未移植为 Linux 桌面电话实现。Linux 默认使用语音消息或 `simulated`；只有自行提供兼容外部 `call.bridgeUrl` 时才使用 `system`。未配置脚本时 Linux 不自动搜索并运行 Windows 音频桥。
+
+新增 GitHub Actions 会在 Ubuntu / Windows 上执行安装、测试、类型检查和 WebUI 构建。模拟测试不能替代真实账号、语音模型与设备验收；实际部署后需验证所用协议端的收发、重连、语音和空间回执。
+
+可选 Python 协议回归不需要语音模型：`python3 -m unittest discover -s tests -p test_asr_sidecar.py -v`（Windows 可将 `python3` 换为 `python`，或执行 `npm run test:asr`）。侧车默认日志写入 Cortico 提供的扩展数据目录，避免 Linux 安装目录只读导致启动失败。
 
 ## 0.1.2 运行条件
 
