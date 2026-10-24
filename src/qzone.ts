@@ -212,7 +212,7 @@ export class QZonePoster {
   private describeSelf(): string {
     const id = this.opts.identity();
     if (!id) return '（你是这个 QQ 的主人，有自己的性格）';
-    return `QQ ${id.selfId} / 昵称「${id.nickname}」`;
+    return `QQ ${id.selfId}`;
   }
 
   /** 发一条动态。content 缺省时自动生成；images/ats 可选。 */

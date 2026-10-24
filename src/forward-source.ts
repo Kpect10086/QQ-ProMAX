@@ -1,4 +1,5 @@
 /** 转发来源推断（纯逻辑，不依赖 cortico 运行时，可独立单测）。 */
+import {externalName} from './external-name.ts';
 
 /** 转发节点暴露的原始会话线索（由 world.renderForwardNode 填充）。 */
 export interface ForwardSourceNode {
@@ -47,12 +48,12 @@ export function forwardSource(
   const labelParts: string[] = [];
   for (const g of groups) {
     const name = identity.groups.get(g);
-    labelParts.push(name ? `群「${name}(${g})」` : `群${g}`);
+    labelParts.push(name ? `群${g}（${externalName(name)}）` : `群${g}`);
   }
   for (const p of peers) {
     const f = identity.friends.get(p);
     const pname = (f?.remark ?? '').trim() || (f?.nickname ?? '').trim() || `QQ用户${p}`;
-    labelParts.push(`私聊「${pname}(${p})」`);
+    labelParts.push(`私聊${p}（${externalName(pname)}）`);
   }
   if (!labelParts.length) return null;
   if (labelParts.length === 1) {

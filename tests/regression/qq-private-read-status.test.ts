@@ -13,7 +13,8 @@ it('an empty private history reports open access and the exact address, then all
   expect(receipt).toContain('读取已开放');expect(receipt).toContain('当前发送限制：允许发送');
   expect(receipt).toContain('to="private:3"');expect(receipt).toContain('不代表会话关闭');
   await q.sendTo('private:3','新消息');expect(sent).toHaveLength(1);
-  const policy=q.routineSegmentText();expect(policy).toContain('联系甲');expect(policy).toContain('联系乙');
+  const policy=q.routineSegmentText();expect(policy).toContain('QQ 1');expect(policy).toContain('QQ 3');
+  expect(policy).not.toContain('联系甲');expect(policy).not.toContain('联系乙');
   expect(policy).toContain('to=private:3');expect(q.nameVariantsFor(3)).toContain('联系乙');
 });
 it('a current send restriction is explicit without confusing it with closed read access',async()=>{

@@ -38,7 +38,7 @@ it('delivers merged-forward images with their actual MIME and original node labe
     expect(blob.mime).toBe('image/png');
     expect(Buffer.from(blob.bytes)).toEqual(png);
   }
-  expect(event.text).toContain('sender(2): first image');
+  expect(event.text).toContain('外部名称="sender"(2): first image');
   expect(event.text).toContain('转发第2条图片1已附在本事件中');
   expect(q.recentImages).toHaveLength(3);
 });

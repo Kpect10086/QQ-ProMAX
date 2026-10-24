@@ -2,6 +2,8 @@
 
 Owner: src/definition.ts, src/world.ts, src/config.ts.
 
+群名、昵称和群名片按外部展示数据处理：消息中转义并限制长度，system 环境与内部通知使用群号和 QQ 号。主动聊天的原始会话记录放在外部资料段，不拼入 system；旧情绪缓存中的名字不会继续进入 system 提示。此隔离降低名称冒充内部指令的风险，聊天正文和模型对外部资料的理解仍需遵守权限与发送限制。
+
 本插件基于 [@hth768](https://github.com/hth768) 制作的 [QQ-final（cortico-world-qq-final）](https://github.com/hth768/cortico-world-qq-final) 插件开发。
 
 QQ ProMAX 是 Cortico 的 QQ World 扩展，支持 QQ 群聊、私聊、空间、消息历史、表情包和语音，适配 Cortico 0.2.6 / World API 6。当前版本已移除桌宠功能，按当前上游源码的 AGPL-3.0-or-later 发布。

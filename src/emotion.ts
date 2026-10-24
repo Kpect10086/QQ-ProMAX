@@ -320,18 +320,11 @@ export class EmotionEngine {
       let head = `【此刻你的心情】${label.name}`;
       if (deg) head += `（${deg}）`;
       lines.push(head);
-      // 起因：归到具体的人（取最近 2 小时内的情绪事件）
-      const now = Date.now();
-      for (const ev of [...this.state.events].reverse()) {
-        if (now - ev.ts < 7_200_000 && ev.why) {
-          lines.push(`起因：${causeText(ev.user, ev.why)}`);
-          break;
-        }
-      }
       const behavior = LABEL_BEHAVIOR[label.name];
       if (behavior) lines.push(`情绪指引：${behavior}`);
       const negative = (LABEL_IMPACT[label.name] ?? 0) < 0;
-      if (negative && label.by) {
+      // Persisted state may contain names captured before QQ IDs were used.
+      if (negative && /^QQ \d+$/.test(label.by)) {
         lines.push(`注意：这份情绪是 ${label.by} 引起的，若眼前的人不是 TA，不要迁怒，正常交流。`);
       }
       if (negative && label.strength >= 2) {
