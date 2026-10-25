@@ -18,6 +18,8 @@ QQ ProMAX 保留 QQ-final 的连接、消息解析、空间、语音等基础代
 
 ## 依赖与可选模型
 
+`src/image-download.ts` 和 `src/time.ts` 改编自 Cortico 的 `src/worlds/qq/image-download.ts` 与 `src/core/util.ts`（MIT，Copyright (c) 2026 Phantivia）。MIT 授权全文保留于 LICENSE-MIT。插件携带这些实现，不要求宿主提供相应源码。
+
 运行时 npm 依赖 ws 使用 MIT 许可证。开发依赖保留各自许可证。
 
 可选的 Python ASR 侧车需要使用者自行安装语音运行库、下载模型，并遵守各项目和模型的许可证。本仓库不附带语音模型。

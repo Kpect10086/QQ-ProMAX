@@ -1,6 +1,5 @@
 import type { DescribeText, EventDescribe } from 'cortico/core/types.ts';
 import type { WorldDefinition } from 'cortico/world.ts';
-import { describeTools } from 'cortico/world.ts';
 import { QQWorld } from './world.ts';
 import { qqDefaults, qqTimezoneOptions, type QQConfigSection } from './config.ts';
 
@@ -190,7 +189,9 @@ export const definition: WorldDefinition<QQConfigSection> = {
     return new QQWorld(ctx.cfg, ctx.packageDir, ctx.dataDir, name=>ctx.secret(name));
   },
   describe: {
-    tools: describeTools(QQWorld.describeToolSpecs(), TOOL_SUMMARIES),
+    tools: QQWorld.describeToolSpecs().map(({name, description, parameters, tags}) => ({
+      name, description, parameters, tags, summary: TOOL_SUMMARIES[name],
+    })),
     events: EVENTS,
   },
 };

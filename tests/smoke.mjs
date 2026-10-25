@@ -3,9 +3,8 @@ import {readFileSync,mkdirSync,existsSync} from 'node:fs';
 import {pathToFileURL,fileURLToPath} from 'node:url';
 import {join} from 'node:path';
 import {WebSocketServer} from 'ws';
-import 'cortico/extensions/runtime.ts';
-import {nullLogger} from 'cortico/core/util.ts';
-const pkgDir=fileURLToPath(new URL('..',import.meta.url));
+const log={debug(){},info(){},warn(){},error(){},child(){return this;}};
+const pkgDir=process.argv[2] ?? fileURLToPath(new URL('..',import.meta.url));
 const {default:def}=await import(pathToFileURL(join(pkgDir,'src/index.ts')).href);
 const meta=JSON.parse(readFileSync(join(pkgDir,'package.json'),'utf8'));
 assert.equal(meta.name,'cortico-world-qq-promax');assert.equal(meta.cortico.api,6);assert.equal(def.label,'QQ ProMAX');
@@ -30,7 +29,7 @@ cfg.qzone.enabled=true;cfg.qzone.tickSec=3600;cfg.qzone.chancePerTick=0;cfg.qzon
 mkdirSync('fixture-data',{recursive:true});
 const q=def.create({cfg,packageDir:pkgDir,dataDir:join(process.cwd(),'fixture-data'),timezone:'UTC',persist:()=>{}});
 const store={range:filter=>saved.filter(e=>(!filter?.source||e.source===filter.source)&&(!filter?.senderKey||e.senderKey===filter.senderKey)).slice(-(filter?.limit??saved.length)),grep:()=>[]};
-const host={log:nullLogger(),store,isPaused:()=>paused,secret:()=>'',blob:()=>null,persist:()=>{},
+const host={log,store,isPaused:()=>paused,secret:()=>'',blob:()=>null,persist:()=>{},
   pushEvent:async(e,o={})=>{const row={...e,cursor:saved.length+1,contextDelivery:o.deliver===false?'archive-only':'deliver'};saved.push(row);return row;},
   pushDeferred:(e,o)=>deferred.push({e,o})};
 const wait=async(test,msg)=>{const until=Date.now()+7000;while(!test()&&Date.now()<until)await new Promise(r=>setTimeout(r,25));assert.ok(test(),msg);};
@@ -63,5 +62,5 @@ try {
   assert.ok(!/desktop-pet|pet-voice|pet-dressframe/.test(readFileSync(join(pkgDir,meta.cortico.webUiClient),'utf8')));
   assert.deepEqual(JSON.parse(readFileSync(join(pkgDir,'describe.json'),'utf8')).tools,JSON.parse(JSON.stringify(def.describe.tools)));
   assert.ok(def.describe.tools.length>=tools.length);assert.ok(requests.includes('send_msg'));
-  console.log(JSON.stringify({passed:true,package:meta.name,version:meta.version,cortico:'0.2.6',transport:'real localhost WebSocket / OneBot v11',tools:tools.length,declaredTools:def.describe.tools.length,panels:ui.panels.length,privateInput:true,replyLimit:true,whitelist:true,replySwitch:true,qzoneRead:true,qzoneReceipt:true,pauseGate:true}));
+  console.log(JSON.stringify({passed:true,package:meta.name,version:meta.version,hostSourceRequired:false,transport:'real localhost WebSocket / OneBot v11',tools:tools.length,declaredTools:def.describe.tools.length,panels:ui.panels.length,privateInput:true,replyLimit:true,whitelist:true,replySwitch:true,qzoneRead:true,qzoneReceipt:true,pauseGate:true}));
 } finally {await q.stop();for(const ws of clients)ws.terminate();await new Promise(r=>wss.close(r));}

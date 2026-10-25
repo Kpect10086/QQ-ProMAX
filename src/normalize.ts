@@ -1,4 +1,4 @@
-import { nowIso, shortTime } from 'cortico/core/util.ts';
+import { nowIso, shortTime } from './time.ts';
 import { existsSync, realpathSync, statSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { faceName, faceIdByName } from './qface-map.ts';

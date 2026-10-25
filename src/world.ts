@@ -7,11 +7,11 @@ import { existsSync, readFileSync, writeFileSync, readdirSync, mkdirSync, rename
 import {venvPython, findVenvPython} from './platform.ts';
 import {spawnLoggedProcess} from './sidecar-process.ts';
 import { createConnection } from 'node:net';
-import { type BlobInput, type EventEnvelope, type Logger, type PromptDocDecl, type ToolDef, type ToolSpec, type ToolCallContext, type World, type WorldWebUiDecl, type WorldHost as FrameworkWorldHost, type WorldLamp, type WorldPanelDecl, type WorldStreamSocket } from 'cortico/core/types.ts';
+import type { BlobInput, EventEnvelope, Logger, PromptDocDecl, ToolDef, ToolSpec, ToolCallContext, World, WorldWebUiDecl, WorldHost as FrameworkWorldHost, WorldLamp, WorldPanelDecl, WorldStreamSocket } from 'cortico/core/types.ts';
 
-import { shortTime } from 'cortico/core/util.ts';
+import { shortTime } from './time.ts';
 import { reviewContent, reviewMemory } from './content-review.ts';
-import { downloadImageBytes } from 'cortico/worlds/qq/image-download.ts';
+import { downloadImageBytes } from './image-download.ts';
 import {QQStreamGate} from './stream-gate.ts';
 import {outgoingChatText} from './outgoing-text.ts';
 import {externalName} from './external-name.ts';

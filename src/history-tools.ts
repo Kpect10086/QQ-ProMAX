@@ -1,5 +1,5 @@
 import type { ToolDef, WorldHost } from 'cortico/core/types.ts';
-import { shortTime } from 'cortico/core/util.ts';
+import { shortTime } from './time.ts';
 
 export interface HistoryCtx {
   getHost: () => WorldHost | null;
