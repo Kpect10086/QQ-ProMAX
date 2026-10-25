@@ -1,7 +1,7 @@
 {
   "name": "cortico-world-qq-promax",
-  "version": "0.1.6",
-  "description": "QQ ProMAX: Cortico QQ 私聊、群聊、空间和语音扩展，支持 OneBot v11 / SnowLuma / NapCat。",
+  "version": "0.2.0",
+  "description": "QQ ProMAX: Cortico QQ 私聊、群聊、空间与语音发送；本地资源限于指定目录，语音输入独立安装。",
   "type": "module",
   "main": "./src/index.ts",
   "license": "AGPL-3.0-or-later",
@@ -21,7 +21,6 @@
     "src",
     "dist/webui.js",
     "ENV_PROMPT.md",
-    "asr_sidecar.py",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md",
     "README.md",
@@ -46,8 +45,6 @@
       "local",
       "external-setup",
       "internal-state",
-      "unsafe",
-      "sensitive-data",
       "unofficial-api",
       "experimental"
     ],
@@ -92,7 +89,7 @@
   "scripts": {
     "test": "node tests/host-free.mjs && vitest run",
     "test:package": "node tests/packaged-install.mjs",
-    "test:asr": "python -m unittest discover -s tests -p test_asr_sidecar.py -v",
+    "test:asr": "python -m unittest discover -s packages/qq-audio-input/tests -p test_asr_sidecar.py -v",
     "build:web": "esbuild src/console/client.ts --bundle --format=esm --outfile=dist/webui.js",
     "typecheck": "tsc --noEmit"
   }

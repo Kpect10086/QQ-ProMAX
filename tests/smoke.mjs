@@ -23,7 +23,7 @@ wss.on('connection',ws=>{clients.push(ws);ws.on('message',raw=>{
 });});
 const cfg=def.defaults();Object.assign(cfg,{enabled:true,mode:'forward',wsUrl:`ws://127.0.0.1:${wss.address().port}`,
   groups:'90000002',privates:'90000003',sendIntervalMs:0,maxPrivateMessagesPerReply:2,privateAggregationWindow:0});
-cfg.sticker.enabled=false;cfg.voice.enabled=false;cfg.call.enabled=false;cfg.asr.mode='off';
+cfg.sticker.enabled=false;cfg.voice.enabled=false;
 cfg.proactive.enabled=false;cfg.proactive.quietFrom=cfg.proactive.quietTo=0;cfg.emotion.enabled=false;cfg.affinity.enabled=false;cfg.routine.enabled=false;
 cfg.qzone.enabled=true;cfg.qzone.tickSec=3600;cfg.qzone.chancePerTick=0;cfg.qzone.imageMode='none';
 mkdirSync('fixture-data',{recursive:true});
@@ -48,7 +48,7 @@ try {
   const feeds=await tools.find(t=>t.name==='qq_qzone_read').handler({view:"feeds",num:1},{});assert.ok(String(feeds).includes('fixture-existing'));
   const posted=await tools.find(t=>t.name==='qq_qzone_post').handler({content:'Fixture post only on local mock'},{});assert.ok(String(posted).includes('fixture-new'));
   paused=true;assert.ok(String(await tools.find(t=>t.name==='qq_qzone_post').handler({content:'Blocked'},{})).includes('暂停'));paused=false;
-  const ui=q.webUi('zh');assert.equal(ui.label,'QQ ProMAX');assert.ok(ui.panels.length>=18);assert.ok(ui.config.every(g=>g.owner==='world:qqbot'));
+  const ui=q.webUi('zh');assert.equal(ui.label,'QQ ProMAX');assert.ok(ui.panels.length>=16);assert.ok(ui.config.every(g=>g.owner==='world:qqbot'));
   assert.ok(!('desktopPet' in def.defaults()));
   assert.ok(!('desktopPet' in q.config));
   assert.ok(tools.every(t=>t.name.startsWith('qq_')));

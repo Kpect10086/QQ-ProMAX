@@ -18,7 +18,7 @@ function fixture(mode: 'system' | 'simulated', quiet: boolean) {
   q.host = {isPaused:()=>false, store:{range:()=>events},
     pushEvent:async(event:any) => {const saved = {...event, cursor:events.length+1}; events.push(saved); return saved;},
     pushDeferred:(event:any, options:any) => queued.push({event, options})};
-  const start = vi.spyOn(q, 'startCall').mockResolvedValue(undefined);
+  const start = vi.fn();
   const receive = async(text:string) => {
     await q.handleMessage({message_id:1, time:Date.now()/1000, message:[{type:'text', data:{text}}]},
       {address:'private:1', kind:'private', label:'fixture'}, {userId:1, name:'fixture'});
@@ -46,21 +46,20 @@ it('native mode also delivers a bare call keyword as a normal chat message', asy
   expect(start).not.toHaveBeenCalled();
 });
 
-it('simulated mode starts only for a complete configured command', async() => {
+it('legacy simulated keywords stay normal text after input separation', async() => {
   const {start, receive} = fixture('simulated', false);
   expect(await receive('我和朋友打电话')).toHaveLength(1);
   expect(start).not.toHaveBeenCalled();
-  expect(await receive(' CALL ME ')).toEqual([]);
-  expect(start).toHaveBeenCalledTimes(1);
+  expect(await receive(' CALL ME ')).toHaveLength(1);
+  expect(start).not.toHaveBeenCalled();
 });
 
 it('a simulated command blocked before acceptance still reaches normal quiet private chat', async() => {
   const {q, start, receive} = fixture('simulated', true);
-  start.mockRestore();
   expect(q.checkQuiet('private:1')).toContain('不主动发送');
   const messages = await receive('打电话');
   expect(messages).toHaveLength(1);
   expect(messages[0].meta.replyAllowed).toBe(true);
-  expect(q.pendingCall.size).toBe(0);
-  expect(q.inCall.size).toBe(0);
+  expect(q.pendingCall).toBeUndefined();
+  expect(q.inCall).toBeUndefined();
 });

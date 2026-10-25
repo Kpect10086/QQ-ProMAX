@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {resourcePath} from './local-resources.ts';
 import { join, extname } from 'node:path';
 import type { Logger } from 'cortico/core/types.ts';
 const prepareImageRequest = async (body: Record<string, unknown>, signal?: AbortSignal) => { signal?.throwIfAborted(); return body; };
@@ -69,7 +70,8 @@ export class StickerStore {
   constructor(dir: string, vision: StickerVisionCfg, log: Logger, dataDir = '',
     private readonly secret: (name: string) => string | undefined = (name) => process.env[name],
     private readonly reportUsage?: (usage: {promptTokens:number;completionTokens:number;cacheHitTokens:number;cacheMissTokens:number},model:string)=>void,
-    private readonly addToFavoritesCb?: (bytes:Uint8Array,ext:string)=>Promise<string|null>) {
+    private readonly addToFavoritesCb?: (bytes:Uint8Array,ext:string)=>Promise<string|null>,
+    private readonly allowedRoot: string = dir) {
     this.dir = dir;
     this.vision = vision;
     this.log = log.child('sticker');
@@ -77,7 +79,7 @@ export class StickerStore {
     this.load();
     this.log.info(`StickerStore init indexFile=${this.indexFile} emojiDir=${this.dir} loaded=${this.meta.size}`);
     try {
-      if (!existsSync(this.dir)) mkdirSync(this.dir, { recursive: true });
+      if (resourcePath(this.allowedRoot, this.dir, true) && !existsSync(this.dir)) mkdirSync(this.dir, { recursive: true });
     } catch {
       this.log.warn('无法创建表情包目录', { dir: this.dir });
     }
@@ -85,6 +87,13 @@ export class StickerStore {
 
   get size(): number {
     return this.meta.size;
+  }
+
+  private filePath(name: string, writing = false): string | null {
+    if (!this.dir || !resourcePath(this.allowedRoot, this.dir, true) || !/^sticker-[a-f0-9]{16}\.(png|jpe?g|gif|webp)$/i.test(name)) return null;
+    const file = join(this.dir, name);
+    // Generated filenames only; missing files may be created after validating their parent.
+    return writing && !lstatSync(file, {throwIfNoEntry: false}) ? file : resourcePath(this.allowedRoot, file);
   }
 
   /** 消息里检测到表情包时调用（异步、不阻塞事件循环）。 */
@@ -107,7 +116,7 @@ export class StickerStore {
     const byEmotion: Record<string, number> = {};
     for (const m of this.meta.values()) byEmotion[m.emotion] = (byEmotion[m.emotion] ?? 0) + 1;
     const recent = [...this.meta.values()]
-      .filter((m) => existsSync(join(this.dir, m.file)))
+      .filter((m) => this.filePath(m.file))
       .filter((m) => !query || [m.label, m.emotion, m.usage, m.tag, m.summary].join(' ').toLowerCase().includes(query.toLowerCase()))
       .sort((a, b) => b.lastSeen - a.lastSeen)
       .slice(0, limit);
@@ -137,7 +146,9 @@ async favoriteSync(max = 50): Promise<{ checked: number; added: number; failed: 
       r.checked++;
       n++;
       try {
-        const buf = readFileSync(join(this.dir, m.file));
+        const file = this.filePath(m.file);
+        if (!file) throw Error('表情不在允许目录内');
+        const buf = readFileSync(file);
         const eid = await this.addToFavoritesCb(buf, m.ext);
         if (eid) {
           m.emojiId = eid;
@@ -199,7 +210,9 @@ async favoriteSync(max = 50): Promise<{ checked: number; added: number; failed: 
       // 去重：已存在则只更新计数/来源，不重复落盘
       const existing = this.meta.get(hash);
       if (existing) {
-        if (!existsSync(join(this.dir, existing.file))) writeFileSync(join(this.dir, existing.file), bytes);
+        const target = this.filePath(existing.file, true);
+        if (!target) return 'failed';
+        if (!existsSync(target)) writeFileSync(target, bytes);
         existing.count++;
         existing.lastSeen = Date.now();
         if (job.summary && !existing.summary) existing.summary = job.summary;
@@ -211,7 +224,9 @@ async favoriteSync(max = 50): Promise<{ checked: number; added: number; failed: 
 
       const ext = this.extOf(job.url, bytes);
       const file = `sticker-${hash.slice(0, 16)}${ext}`;
-      writeFileSync(join(this.dir, file), bytes);
+      const target = this.filePath(file, true);
+      if (!target) return 'failed';
+      writeFileSync(target, bytes);
 
       const meta: StickerMeta = {
         hash,
@@ -352,7 +367,7 @@ async favoriteSync(max = 50): Promise<{ checked: number; added: number; failed: 
     if (!this.indexFile || !existsSync(this.indexFile)) return;
     try {
       const raw = JSON.parse(readFileSync(this.indexFile, 'utf8')) as Record<string, StickerMeta>;
-      for (const [k, v] of Object.entries(raw)) if (k === v.hash) this.meta.set(k, v);
+      for (const [k, v] of Object.entries(raw)) if (k === v.hash && /^sticker-[a-f0-9]{16}\.(png|jpe?g|gif|webp)$/i.test(v.file)) this.meta.set(k, v);
     } catch {
       this.log.warn('表情包索引损坏，忽略', { file: this.indexFile });
     }

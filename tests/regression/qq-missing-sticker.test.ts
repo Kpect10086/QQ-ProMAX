@@ -9,7 +9,7 @@ const dirs:string[]=[];
 afterEach(()=>{vi.unstubAllGlobals();for(const dir of dirs.splice(0))rmSync(dir,{recursive:true,force:true});});
 function fixture(){
   const dir=mkdtempSync(join(tmpdir(),'qq-missing-sticker-'));dirs.push(dir);
-  const q=new QQWorld({privates:'1',emojiDir:dir,sendIntervalMs:0,contentReviewUrl:'',voice:{enabled:false},
+  const q=new QQWorld({privates:'1',emojiDir:dir,localResourcesDir:dir,sendIntervalMs:0,contentReviewUrl:'',voice:{enabled:false},
     maxPrivateMessagesPerReply:2,antiLoop:{enabled:false},quietReply:{enabled:false},routine:{enabled:false},proactive:{quietFrom:0,quietTo:0}}) as any;
   const sent:any[]=[],events:any[]=[];q.log=nullLogger();
   q.host={isPaused:()=>false,pushEvent:async(e:any)=>{events.push(e);return e;},store:{range:()=>[{cursor:1,type:'qq.message',origin:'external',senderKey:'private:1'}]}};

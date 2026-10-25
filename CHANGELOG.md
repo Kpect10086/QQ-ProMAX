@@ -1,3 +1,11 @@
+# 0.2.0
+
+- 本地资源改为 localResourcesDir 明确指定的专用目录，表情与状态文件拒绝越界、目录穿越及链接逃逸；表情索引中的路径也重新验证。
+- 移除父目录扫描、Python/模型探测、自动侧车启动、模型下载及系统通话采音。保留通过用户配置服务发送 TTS 语音。
+- 语音输入拆成独立 cortico-world-qq-audio-input@0.1.0，默认关闭，近期语音/允许名单限定，不读取本机音频。
+- 主包撤回 unsafe/sensitive-data 自声明并申请市场复核；独立语音输入包保留 sensitive-data。市场历史标签须维护者批准撤销。
+- 迁移：旧 asr/call/voxcpmSidecar 配置不再执行；原外部表情/状态文件须迁入允许目录，详见 README。
+
 # QQ ProMAX (src/world.ts)
 
 ## 0.1.6 - 2026-10-25

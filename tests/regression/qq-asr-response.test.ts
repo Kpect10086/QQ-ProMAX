@@ -1,5 +1,5 @@
 import {afterEach, expect, it, vi} from 'vitest';
-import {HttpRecognizer} from '../../src/asr/recognizer.ts';
+import {HttpRecognizer} from '../../packages/qq-audio-input/src/asr/recognizer.ts';
 afterEach(() => vi.unstubAllGlobals());
 const pcm = new Int16Array(160);
 it.each([

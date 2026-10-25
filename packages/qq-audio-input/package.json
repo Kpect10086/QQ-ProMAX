@@ -1,0 +1,61 @@
+{
+  "name": "cortico-world-qq-audio-input",
+  "version": "0.1.0",
+  "description": "按允许名单及近期语音消息编号提供 QQ 语音转写；独立启用，不采集麦克风或系统声音。",
+  "type": "module",
+  "main": "./src/index.ts",
+  "license": "AGPL-3.0-or-later",
+  "engines": {
+    "node": ">=22.16.0"
+  },
+  "os": [
+    "win32",
+    "linux"
+  ],
+  "files": [
+    "src",
+    "asr_sidecar.py",
+    "describe.json",
+    "README.md",
+    "LICENSE",
+    "LICENSE-MIT",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "keywords": [
+    "cortico-world",
+    "qq",
+    "onebot",
+    "asr"
+  ],
+  "cortico": {
+    "kind": "world",
+    "api": 6,
+    "displayName": "QQ Audio Input",
+    "describe": "describe.json",
+    "tags": [
+      "im",
+      "qq",
+      "voice",
+      "sensitive-data",
+      "external-setup",
+      "unofficial-api",
+      "experimental"
+    ]
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Kpect10086/QQ-ProMAX.git",
+    "directory": "packages/qq-audio-input"
+  },
+  "homepage": "https://github.com/Kpect10086/QQ-ProMAX#readme",
+  "bugs": {
+    "url": "https://github.com/Kpect10086/QQ-ProMAX/issues"
+  }
+}

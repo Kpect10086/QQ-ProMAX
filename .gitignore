@@ -9,6 +9,8 @@ fixture-data/
 *.db*
 *.sqlite*
 coverage/
+__pycache__/
+*.pyc
 smapi/bin/
 smapi/obj/
 tests/dotnet/bin/

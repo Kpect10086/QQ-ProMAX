@@ -3,18 +3,18 @@
 """
 本地 ASR 侧车：OpenAI 兼容 /transcriptions 端点（multipart: file=wav + model）。
 
-由 cortico-world-qq-final 在 call.asrMode='local' 时自动拉起（见 src/world.ts）。
+独立 QQ Audio Input 包保留的可选手动服务；插件不会自动启动此脚本。
 无需写死密钥：纯本地、离线，CPU 即可。
 
 引擎：
   - vosk          ：轻量离线，中文小模型（推荐）。pip install vosk + 下载中文模型目录。
   - fasterWhisper ：更准，但首次需下载模型（HF 可能受限）。pip install faster-whisper。
   - funasr        ：SenseVoiceSmall，中文/多语更准，CPU 推理。pip install funasr；
-                    模型目录留空则自动从 ModelScope 下载（iic/SenseVoiceSmall），也可在 call.asrLocalModelPath 指定本地目录。
+                    模型目录留空则自动从 ModelScope 下载（iic/SenseVoiceSmall），也可通过 --model-dir 指定本地目录。
 
-用法（扩展会自动拼好参数）：
+手动用法：
   python asr_sidecar.py <port> --engine funasr --model-dir <本地模型目录或留空>
-  （模型目录由调用方 cortico-world-qq-final 的 call.asrLocalModelPath / 环境变量 QQBOT_ASR_MODEL_DIR 决定，本脚本不写死任何路径）
+  （模型目录由使用者显式指定；funasr 留空时可能联网下载模型。）
 """
 import argparse
 import io

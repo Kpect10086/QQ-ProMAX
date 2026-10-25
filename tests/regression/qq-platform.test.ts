@@ -3,7 +3,7 @@ import {mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync} from 'node:
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {nullLogger} from 'cortico/core/util.ts';
-import {venvPython} from '../../src/platform.ts';
+import {venvPython} from '../../packages/qq-audio-input/src/platform.ts';
 import {QQWorld} from '../../src/world.ts';
 
 const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform')!;
@@ -30,19 +30,4 @@ it('supports POSIX python3/python and the Windows venv layout', () => {
   touch(join(dir, 'bin', 'python3'));
   expect(venvPython(dir, 'linux')).toBe(join(dir, 'bin', 'python3'));
   expect(venvPython(dir, 'win32')).toBe(join(dir, 'Scripts', 'python.exe'));
-});
-
-it.each(['linux', 'win32'] as const)('resolves ASR, TTS and bridge venvs on %s', platform => {
-  Object.defineProperty(process, 'platform', {value: platform});
-  const dir = temp(); const venv = join(dir, 'venv_vox');
-  mkdirSync(join(venv, platform === 'win32' ? 'Scripts' : 'bin'), {recursive: true});
-  const python = touch(venvPython(venv));
-  const script = touch(join(dir, 'vox_tts_server.py'));
-  const models = join(dir, 'models'); mkdirSync(models); touch(join(models, 'model.safetensors'));
-  const q: any = new QQWorld({asr: {localVenv: venv, localEngine: 'funasr'},
-    voxcpmSidecar: {script, venv, modelDir: models}});
-  q.packageDir = dir; q.log = nullLogger();
-  expect(q.resolveAsrSidecar()?.python).toBe(python);
-  expect(q.resolveSidecar()?.python).toBe(python);
-  expect(q.findBridgePython()).toBe(python);
 });

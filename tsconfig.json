@@ -16,6 +16,7 @@
     "noEmit": true
   },
   "include": [
-    "src/**/*.ts"
+    "src/**/*.ts",
+    "packages/qq-audio-input/src/**/*.ts"
   ]
 }

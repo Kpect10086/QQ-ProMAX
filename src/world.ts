@@ -1,12 +1,8 @@
 import type {Language} from 'cortico/core/language.ts';
 type WorldHost = FrameworkWorldHost & {isPaused?():boolean};
 const toolError = (error: string) => ({failed:true as const,text:error,error});
-import { spawn, type ChildProcess } from 'node:child_process';
 import {createHash, randomBytes} from 'node:crypto';
-import { existsSync, readFileSync, writeFileSync, readdirSync, mkdirSync, renameSync, statSync } from 'node:fs';
-import {venvPython, findVenvPython} from './platform.ts';
-import {spawnLoggedProcess} from './sidecar-process.ts';
-import { createConnection } from 'node:net';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, statSync } from 'node:fs';
 import type { BlobInput, EventEnvelope, Logger, PromptDocDecl, ToolDef, ToolSpec, ToolCallContext, World, WorldWebUiDecl, WorldHost as FrameworkWorldHost, WorldLamp, WorldPanelDecl, WorldStreamSocket } from 'cortico/core/types.ts';
 
 import { shortTime } from './time.ts';
@@ -19,28 +15,17 @@ import {QQ_QUIET_GROUP, QuietReplies, routineQuiet, quietReplyAllowed} from './q
 import {forwardSource as inferForwardSource} from './forward-source.ts';
 import { OneBotDriver } from './driver.ts';
 import { QZonePoster, type QZoneConfig } from './qzone.ts';
-import { QQ_CONFIG_GROUP, QQ_VOICE_GROUP, QQ_CALL_GROUP, QQ_ASR_GROUP, QQ_VOXCPM_SIDECAR_GROUP, QQ_DEFAULTS, normalizeConfig, toIds, type QQConfigSection, type QQWorldConfig } from './config.ts';
-import { transcribeRecord, decodeRecord, synthesizeVoice, judgeVoiceWish, checkVoiceDeps, voiceReady, splitIntoSentences, type RuntimeVoiceCfg } from './voice.ts';
+import { QQ_CONFIG_GROUP, QQ_VOICE_GROUP, QQ_DEFAULTS, normalizeConfig, toIds, type QQConfigSection, type QQWorldConfig } from './config.ts';
+import { synthesizeVoice, judgeVoiceWish, checkVoiceDeps, voiceReady, type RuntimeVoiceCfg } from './voice.ts';
 
-// 「听」能力模块化：切句/并句/识别契约与 cortico-world-desktop-pet 完全对齐，未来合并桌宠时共用一份。
-import { AudioListener } from './asr/listener.ts';
-import { HttpRecognizer } from './asr/recognizer.ts';
-import { isAbsolute, join, dirname } from 'node:path';
+import {join} from 'node:path';
+import {resourcePath} from './local-resources.ts';
 import { fileURLToPath } from 'node:url';
 import { buildOutgoing, resolveEmojiFile, eventClock, eventTs, renderIncoming, renderSegmentsPlain, splitReplyIntoMessages } from './normalize.ts';
 
 const EXT_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const ENV_PROMPT_FILE = fileURLToPath(new URL('../ENV_PROMPT.md', import.meta.url));
 
-/** 去掉语音转写前缀（"[语音转写] "），用于触发词匹配 */
-function stripTranscribePrefix(t: string): string {
-  return (t || '').replace(/^\[语音转写\]\s*/, '').trim();
-}
-/** 在 haystack 中是否包含逗号分隔词表中的任意一项（用于触发词/挂断词匹配） */
-function matchAnyWord(haystack: string, commaSep: string): boolean {
-  const words = (commaSep || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
-  return words.some((w) => haystack.includes(w));
-}
 import { type Conv, type OneBotMessage, type OneBotSegment, type QQIdentity, type QQSenderBrief } from './types.ts';
 import { Vision } from './vision.ts';
 import { previewVideo } from './video.ts';
@@ -84,7 +69,7 @@ interface PendingSend {
   sent?: boolean;
 }
 
-/** 把配置里的 JSON 字符串安全地解析成对象；非法或空则回退 {}。用于 TTS/ASR 额外参数透传。 */
+/** 把配置里的 JSON 字符串安全地解析成对象；非法或空则回退 {}。用于 TTS 额外参数透传。 */
 function parseJsonObject(raw: unknown): Record<string, unknown> {
   if (typeof raw !== 'string' || !raw.trim()) return {};
   try {
@@ -95,44 +80,11 @@ function parseJsonObject(raw: unknown): Record<string, unknown> {
   }
 }
 
-/** 构建 ffmpeg 候选路径（按 配置 → PATH → 仓库 ffmpeg-static 顺序尝试）。来源于 alont1 的 best-effort 解码思路。 */
-function buildFfmpegCandidates(configPath: string, packageDir: string): string[] {
-  const out: string[] = [];
-  if (configPath && configPath.trim()) out.push(configPath.trim());
-  out.push('ffmpeg');
-  if (packageDir) {
-    const bin = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
-    out.push(join(packageDir, 'node_modules', 'ffmpeg-static', bin));
-    out.push(join(packageDir, '..', 'node_modules', 'ffmpeg-static', bin));
-  }
-  return out;
-}
-
 export class QQWorld implements World {
   readonly id = 'qqbot';
   private config: QQWorldConfig = QQ_DEFAULTS;
   /** 语义判定结果缓存：conv 地址 -> 本次是否应说语音（在入站时判定，sendTo 消费后清除）。 */
   private voiceWish = new Map<string, boolean>();
-  /** 正在进行的语音通话会话（按会话地址）。模拟"打电话"：实时听说 + 流式语音 */
-  private inCall = new Set<string>();
-  /** 正在"接通中"的会话：已收到来电、但本地语音模型尚未就绪，正在等待其初始化完成后接听 */
-  private pendingCall = new Set<string>();
-  /** 系统级真接电话(system 模式)：每会话的「听」管线（切句+识别+并句，见 src/asr/listener.ts，与桌宠同契约，未来合并共用） */
-  private systemListeners = new Map<string, AudioListener>();
-  private nativeCallTimer: ReturnType<typeof setInterval> | null = null;
-  private nativeCallPolling = false;
-  private nativeCallId = '';
-  /** 接通中被主动取消（收到挂断词）的标记 */
-  private pendingAbort = new Map<string, boolean>();
-  private callIdleTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  /** 由本扩展拉起的 voxcpm 侧车子进程（provider=voxcpm 且启用自拉起时）；detached，Cortico 退出后可能仍存活 */
-  private sidecarProc: ChildProcess | null = null;
-  /** 上次拉起侧车的时间戳（用于日志/排查） */
-  private sidecarLaunchedAt = 0;
-  /** 由本扩展拉起的本地 ASR 侧车子进程（asr.mode=local 时）；detached，Cortico 退出后可能仍存活 */
-  private asrSidecar: ChildProcess | null = null;
-  /** 由本扩展拉起的音频桥子进程(call_bridge.py)；detached，崩溃后可被 ensureAudioBridge 自愈拉起 */
-  private audioBridgeProc: ChildProcess | null = null;
   private host: WorldHost | null = null;
   private log: Logger = consoleLogger();
   private driver: OneBotDriver | null = null;
@@ -167,7 +119,7 @@ export class QQWorld implements World {
   private lastUserMsgAtByQQ = new Map<number,number>();
   private readonly eventSockets = new Set<WorldStreamSocket>();
   private packageDir = '';
-  private emojiDirAbs = '';
+  private get emojiDirAbs() {return resourcePath(this.config.localResourcesDir || this.dataDir, this.config.emojiDir || 'emoji', true) || '';}
   /** 本进程已处理过的 message_id（去重，防止 NapCat 重投导致同一消息回两遍）。仅内存。 */
   private readonly processedIds = new Set<string>();
   private connectedAtSec = Math.floor(Date.now() / 1000);
@@ -188,7 +140,7 @@ export class QQWorld implements World {
   private privateReplyBudgets = new Map<string, {cursor: number; counts: Map<string, number>}>();
   /** 群成员昵称→QQ 缓存（懒加载，供按昵称 @人/戳人）。groupId -> (小写名->qq)。 */
   private readonly memberIndex = new Map<number, Map<string, number>>();
-  private stickerDirAbs = '';
+  private get stickerDirAbs() {return resourcePath(this.config.localResourcesDir || this.dataDir, this.config.sticker.dir || this.config.emojiDir || 'emoji', true) || '';}
   /** 定时提醒 / 记事本存储。 */
   private reminders!: ReminderStore;
   /** 到点提醒检查定时器句柄。 */
@@ -215,6 +167,7 @@ export class QQWorld implements World {
    */
   private msgChain: Promise<void> = Promise.resolve();
   private streamGate: QQStreamGate | null = null;
+  private policyTimer: ReturnType<typeof setInterval> | null = null;
   private readonly quietReplies: QuietReplies;
 
   constructor(config?: Partial<QQWorldConfig>, packageDir?: string, dataDir = '', private readonly secretResolver?: (name:string)=>string) {
@@ -223,16 +176,6 @@ export class QQWorld implements World {
     this.dataDir = dataDir;
     this.quietReplies = new QuietReplies(dataDir ? join(dataDir, 'qq-quiet-replies.json') : '');
     this.stateFile = dataDir ? join(dataDir, 'qqbot-known-messages.json') : '';
-    this.emojiDirAbs = this.config.emojiDir
-      ? isAbsolute(this.config.emojiDir)
-        ? this.config.emojiDir
-        : join(this.packageDir, this.config.emojiDir)
-      : '';
-    this.stickerDirAbs = this.config.sticker.dir
-      ? isAbsolute(this.config.sticker.dir)
-        ? this.config.sticker.dir
-        : join(this.packageDir, this.config.sticker.dir)
-      : this.emojiDirAbs;
     this.vision = new Vision(this.config.vision, consoleLogger());
   }
 
@@ -367,9 +310,8 @@ export class QQWorld implements World {
     this.deliveredSendPolicy = '';
     this.log = this.host.log.child('qq');
     this.ensureReverseToken();
-    this.publishCallAudioState();
     if (this.dataDir) {
-      this.streamGate = new QQStreamGate(() => this.config.directorStatusFile,
+      this.streamGate = new QQStreamGate(() => resourcePath(this.config.localResourcesDir || this.dataDir, this.config.directorStatusFile) || '',
         join(this.dataDir, 'qq-live-deferred.json'), () => this.host?.isPaused?.() ?? true,
         async ev => {
           if (this.streamGate?.blocked() || this.host?.isPaused?.()) throw Error('QQ delivery deferred');
@@ -379,17 +321,11 @@ export class QQWorld implements World {
       this.streamGate.start();
     }
     this.vision = new Vision(this.config.vision,this.log,this.dataDir,()=>{const c=this.config.vision,key=this.resolveSecret(c.apiKeySecret);return c.endpoint&&c.model&&key?{endpoint:c.endpoint,model:c.model,apiKey:key}:null;},(usage,model)=>this.host?.reportUsage(usage,{model,label:'QQ辅助视觉'}));
-    this.stickers = new StickerStore(this.stickerDirAbs || this.emojiDirAbs || join(this.packageDir, 'emoji'), this.config.vision, this.log, this.dataDir, (name) => this.resolveSecret(name),(usage,model)=>this.host?.reportUsage(usage,{model,label:'QQ表情标注'}),(bytes,ext)=>this.pushStickerToQQFavorites(bytes,ext));
+    this.stickers = new StickerStore(this.stickerDirAbs || this.emojiDirAbs, this.config.vision, this.log, this.dataDir, (name) => this.resolveSecret(name),(usage,model)=>this.host?.reportUsage(usage,{model,label:'QQ表情标注'}),(bytes,ext)=>this.pushStickerToQQFavorites(bytes,ext),this.config.localResourcesDir || this.dataDir);
     this.syncConfigRoster();
     this.driver = this.createDriver();
     await this.driver.start();
-    this.nativeCallTimer = setInterval(() => {
-      this.publishSendPolicy();
-      if (this.nativeCallPolling) return;
-      this.nativeCallPolling = true;
-      void this.pollNativeCall().catch(e => this.log.warn('原生通话检查失败', String(e)))
-        .finally(() => { this.nativeCallPolling = false; });
-    }, 2000);
+    this.policyTimer = setInterval(() => this.publishSendPolicy(), 2000);
     this.loadState();
     this.initProactive();
     this.initQzone();
@@ -407,13 +343,6 @@ export class QQWorld implements World {
     this.aliasesFile = this.dataDir ? join(this.dataDir, 'qqbot-aliases.json') : '';
     this.loadAliases();
 
-    // 本地 ASR 侧车作为「共享服务」预热：voice 收语音识别用同一个侧车，
-    // 拉起条件只看 asr.mode==='local'（不再依赖 call.enabled）。异步预热，不阻塞启动。
-    if (this.config.asr.mode === 'local') {
-      void this.ensureAsrSidecarAndReady()
-        .then((url) => { if (url) this.log.info('[asr-sidecar] 共享侧车已就绪', { url }); })
-        .catch((e) => this.log.warn('[asr-sidecar] 预热失败（首次使用时将重试）', { err: String(e) }));
-    }
 
   }
 
@@ -523,7 +452,6 @@ export class QQWorld implements World {
         if (this.host?.isPaused?.()) throw new Error('Run paused');
         const replyMode = this.checkReplyMode(address);
         if (replyMode) return replyMode;
-        if (this.inCall.has(address)) return QQWorld.SEND_BLOCKED + '通话期间停止后台主动发言。';
         if (this.isQuietHours()) return QQWorld.SEND_BLOCKED + '静默时段停止主动发言，仅回复白名单。';
         text = outgoingChatText(text, address);
         // 解析主动生成文本里的动作标记（让主动冒泡也能 @人 / 戳一啄）：
@@ -642,7 +570,6 @@ export class QQWorld implements World {
       if (!c.active) continue;
       if (!this.canRead(c.address) || this.historyOnlyConvs.has(c.address)) continue;
       if (this.checkReplyMode(c.address)) continue;
-      if (this.inCall.has(c.address)) continue;
       if (mode === 'private' && c.kind !== 'private') continue;
       if (mode === 'group' && c.kind !== 'group') continue;
       out.push({ address: c.address, kind: c.kind, label: c.label });
@@ -650,7 +577,7 @@ export class QQWorld implements World {
     return out;
   }
 
-  /** 解析密钥：优先取 process.env，否则回退到 deployments/providers 下各 provider 的 .env 文件（Cortico 不把 .env 注入 process.env）。 */
+  /** 解析密钥：仅调用宿主提供的密钥解析器，不探测或读取部署目录中的 .env 文件。 */
   private resolveSecret(name: string): string | undefined {
     const n = (name || '').trim();
     if (!n) return undefined;
@@ -669,10 +596,8 @@ export class QQWorld implements World {
     return {
       enabled: v.enabled,
       provider: v.provider,
-      asr: v.asr,
       tts: v.tts,
       semanticJudge: v.semanticJudge,
-      audioFallback: v.audioFallback,
       judgeEndpoint: v.judgeEndpoint,
       judgeApiKey: this.resolveSecret(v.judgeApiKeySecret) ?? '',
       judgeModel: v.judgeModel,
@@ -682,16 +607,6 @@ export class QQWorld implements World {
       voiceTtsModel: v.voiceTtsModel,
       voiceTimeout: (typeof v.voiceTimeout === 'number' && v.voiceTimeout > 0 ? v.voiceTimeout : 120) * 1000,
       voiceExtraTts: parseJsonObject(v.voiceExtraTts),
-      // ASR 统一走顶层 asr.* 共享配置（语音收发与语音通话共用同一引擎）：
-      // local 走本扩展自动拉起的本地侧车 /asr；cloud 走 asr.cloudUrl；off 则无（仅 TTS 播报/单向）。
-      transcribeUrl: (() => {
-        const a = this.config.asr;
-        if (a.mode === 'local') return `http://127.0.0.1:${this.asrHostPort().port}/asr`;
-        if (a.mode === 'cloud' && (a.cloudUrl || '').trim()) return (a.cloudUrl || '').trim();
-        return '';
-      })(),
-      transcribeTimeout: (typeof this.config.asr.transcribeTimeout === 'number' && this.config.asr.transcribeTimeout > 0 ? this.config.asr.transcribeTimeout : 60000),
-      ffmpegCandidates: buildFfmpegCandidates(this.config.asr.ffmpegPath, this.packageDir),
       voxcpmUrl: v.voxcpmUrl || '',
       voxcpmVoiceDesc: v.voxcpmVoiceDesc || '自然女声',
       voxcpmSpeed: typeof v.voxcpmSpeed === 'number' && v.voxcpmSpeed > 0 ? v.voxcpmSpeed : 1.0,
@@ -1081,7 +996,9 @@ export class QQWorld implements World {
     const timer = setTimeout(() => ctrl.abort(), 30000);
     try {
       if (this.config.generationInstructionFile) {
-        const state = JSON.parse(readFileSync(this.config.generationInstructionFile, 'utf8'));
+        const file = resourcePath(this.config.localResourcesDir || this.dataDir, this.config.generationInstructionFile);
+        if (!file) throw Error('状态文件不在本地资源允许目录内');
+        const state = JSON.parse(readFileSync(file, 'utf8'));
         if (!state || typeof state.active !== 'boolean') throw new Error('Invalid generation instructions');
         if (state.active) {
           if (!['en','zh'].includes(state.language) || typeof state.instruction !== 'string'
@@ -1119,13 +1036,9 @@ export class QQWorld implements World {
   }
 
   async stop(): Promise<void> {
+    if (this.policyTimer) clearInterval(this.policyTimer);
+    this.policyTimer = null;
     await this.streamGate?.stop(); this.streamGate = null;
-    if (this.nativeCallTimer) clearInterval(this.nativeCallTimer);
-    this.nativeCallTimer = null;
-    this.inCall.clear();
-    for (const address of [...this.systemListeners.keys()]) await this.callBridgeExit(address);
-    this.publishCallAudioState();
-    for (const address of [...this.callIdleTimers.keys()]) this.clearCallIdle(address);
     for (const c of this.convs.values()) {
       if (c.aggregationTimer) {
         clearTimeout(c.aggregationTimer);
@@ -1688,25 +1601,13 @@ private async pushStickerToQQFavorites(bytes: Uint8Array, ext: string): Promise<
         if (videoHandled) preview.text = '[视频未读取：每条消息最多预览一个视频]';
         else if (this.host?.isPaused?.()) preview.text = '[视频未读取：运行已暂停]';
         else if (this.config.deliverImageAttachments && host.modelFacts.accepts('image/jpeg')) {
-          preview = await previewVideo(String(s.data.url ?? ''), buildFfmpegCandidates(this.config.asr.ffmpegPath, this.packageDir), this.dataDir);
+          preview = await previewVideo(String(s.data.url ?? ''), ['ffmpeg'], this.dataDir);
         }
         videoHandled = true;
         text += '\n' + preview.text;
         if (preview.blob) blobs.push(preview.blob);
       } else if (s.type === 'record') {
-        let asText = false;
-        if (this.config.voice.enabled && this.config.voice.asr) {
-          const transcribed = await transcribeRecord(s, (ev as { message_id?: number }).message_id, this.driver!, this.voiceRuntime(), this.log);
-          if (transcribed) {
-            if (text) text += '\n';
-            text += `[语音转写] ${transcribed}`;
-            asText = true;
-          }
-        }
-        if (!asText && (this.config.voice.enabled ? this.config.voice.audioFallback : true)) {
-          const wav = await decodeRecord(s, this.driver!, this.voiceRuntime(), this.log);
-          if (wav) blobs.push({ bytes: wav, mime: 'audio/wav', name: 'qq-voice', fallbackText: '[语音]' });
-        }
+        text += '\n[语音消息：主包不读取音频；可用独立 QQ Audio Input 的 qq_audio_transcribe 工具，消息编号 ' + String(ev.message_id ?? '') + ']';
       }
     }
 
@@ -1785,31 +1686,6 @@ private async pushStickerToQQFavorites(bytes: Uint8Array, ext: string): Promise<
     }
     this.log.info('HANDLE_PUSH pre kind=' + conv.kind);
     // 记录“应当回复”的会话，供回合收束时兜底自动发送（模型若只输出文本未调 qq_send）。
-    // ---------- 语音通话（模拟）拦截：来电接听 / 通话中挂断 ----------
-    if (this.config.call.enabled && !host.isPaused?.() && !this.incomingReplyBlock(conv.address)) {
-      const plain = stripTranscribePrefix(text).toLowerCase();
-      if (this.inCall.has(conv.address)) {
-        if (matchAnyWord(plain, this.config.call.hangupWords)) {
-          await this.endCall(conv.address);
-          return;
-        }
-        // 通话中：继续走下面的 pushEvent，回复由 sendTo 强制语音 + 流式
-      } else if (this.pendingCall.has(conv.address)) {
-        // 接通中（等待本地语音模型初始化）：收到挂断词则取消等待并告别
-        if (matchAnyWord(plain, this.config.call.hangupWords)) {
-          this.pendingAbort.set(conv.address, true);
-          this.pendingCall.delete(conv.address);
-          this.clearCallIdle(conv.address);
-          await this.sendTo(conv.address, await this.callFarewell(conv.address));
-          return;
-        }
-      } else if (this.config.call.mode === 'simulated'
-        && this.toWordList(this.config.call.triggerWords).some(word => plain === word.toLowerCase())
-        && !this.checkQuiet(conv.address)) {
-        await this.startCall(conv.address);
-        return;
-      }
-    }
     try {
       await this.pushIncomingMessage({
         type: 'qq.message',
@@ -2275,7 +2151,7 @@ private async pushStickerToQQFavorites(bytes: Uint8Array, ext: string): Promise<
     if (this.config.quietReply.enabled) {
       if (!this.isQuietHours()) return null;
       if (!quietReplyAllowed(address, this.config.quietReply)) return QQWorld.SEND_BLOCKED + '作息静默期间仅回复独立白名单，消息未发送。';
-      if (!this.inCall.has(address) && !this.quietReplies.allows(address, this.latestReplyCursor(address))) return QQWorld.SEND_BLOCKED + '静默期间没有待回复消息，不主动发送。';
+      if (!this.quietReplies.allows(address, this.latestReplyCursor(address))) return QQWorld.SEND_BLOCKED + '静默期间没有待回复消息，不主动发送。';
       return null;
     }
     return address.startsWith('group:') && this.isQuietHours()
@@ -2376,7 +2252,6 @@ private async pushStickerToQQFavorites(bytes: Uint8Array, ext: string): Promise<
         this.log.info('QQ 内容未获放行，改为文字反馈', {reason: decision.reason, address});
       }
     }
-    // 系统级真接电话：通话中 AI 的回复通过音频桥实时播报给通话对面，不发送 QQ 消息
     const changed = this.checkQuiet(address);
     if (changed) return changed;
     if (isCurrent && !isCurrent()) return QQWorld.SEND_BLOCKED + '会话已更新，取消旧的主动草稿。';
@@ -2396,9 +2271,6 @@ private async pushStickerToQQFavorites(bytes: Uint8Array, ext: string): Promise<
       ? `（未附上 ${missingStickers.length} 个无效表情包标记，只发送其余有效内容；无需补图，不要重发正文。以后确需表情包时只复制 qq_sticker_stats 返回的完整标记。）` : '';
     if (!outgoing.some(segment => segment.type !== 'text' || segment.data.text.trim())) {
       return QQWorld.SEND_BLOCKED + (missingStickers.length ? '表情包不存在，且没有有效正文，本次未发送；下次先用 qq_sticker_stats 取真实标记，不编造文件名。' : '正文只有禁止的 QQ 原生表情，未发送；请用文字或收藏表情包。');
-    }
-    if (!outgoing.some(segment => segment.type === 'image') && text !== 'filtered' && this.inCall.has(address) && this.config.call.mode === 'system') {
-      return await this.systemSpeak(address, text) + stickerNote;
     }
     const limit = address.startsWith('private:') ? this.config.maxPrivateMessagesPerReply : 0;
     if (limit > 0 && (counts.get(address) ?? 0) >= limit) return QQWorld.SEND_BLOCKED + '私聊本轮回复已达 ' + limit + ' 条上限，请等待下一轮消息，不要重试。';
@@ -2421,14 +2293,11 @@ private async pushStickerToQQFavorites(bytes: Uint8Array, ext: string): Promise<
       if (!this.config.voice.enabled || !this.config.voice.tts) return QQWorld.SEND_BLOCKED + 'QQ 语音发送未开启。';
       if (outgoing.some(segment => segment.type === 'image')) return QQWorld.SEND_BLOCKED + '语音请只填写要朗读的正文，图片另发。';
     }
-    const wantVoice = !outgoing.some(segment => segment.type === 'image') && text !== 'filtered' && this.config.voice.enabled && this.config.voice.tts && (voice ?? (this.voiceWish.get(address) === true || (this.inCall.has(address) && this.config.call.forceVoice)));
+    const wantVoice = !outgoing.some(segment => segment.type === 'image') && text !== 'filtered' && this.config.voice.enabled && this.config.voice.tts && (voice ?? this.voiceWish.get(address) === true);
     let voiceFallback = '';
 
     if (wantVoice) {
       this.voiceWish.delete(address);
-      if (this.inCall.has(address) && this.config.call.streamChunks) {
-        return await this.sendVoiceStreaming(text, address, replyMessageId, atQQs, counts, beforeSend) + stickerNote;
-      }
       const rec = await synthesizeVoice(text, address, this.driver, this.voiceRuntime(), this.log);
       if (rec) {
         const segs: Array<Record<string, unknown>> = [];
@@ -2525,823 +2394,6 @@ private async pushStickerToQQFavorites(bytes: Uint8Array, ext: string): Promise<
         + `已向 ${this.convLabel(address)} 确认发送 ${ok}/${total} 段，另 ${total - ok} 段未确认成功。${tail}${stickerNote}不要整段重发。`;
     }
     return `已向 ${this.convLabel(address)} 发送 ${ok}/${total} 段。${tail}${stickerNote}${voiceFallback}${text.trim() === 'filtered' ? '实际发送的正文是 filtered。' : ''}`;
-  }
-
-  // ================= 语音通话（模拟）=================
-  // OneBot/NapCat 无法真正接听系统级 QQ 电话（无来电事件/接听 API/媒体通道），
-  // 这里用“语音消息会话”模拟打电话：触发词接听 → 即时听说（ASR→LLM→TTS）→ 分句流式语音 → 挂断词/超时挂断。
-  // 设计上与传输解耦：本文件是 QQ(OneBot record) 传输适配；桌宠等其它 World 可照搬这套状态机接自己的麦克风/扬声器。
-
-  /** 把文本按句末标点切成句子，逐句合成逐句发送，形成流式语音效果。 */
-  private async sendVoiceStreaming(text: string, address: string, replyMessageId?: number, atQQs?: number[], counts = this.replyCounts(address), beforeSend?: () => boolean): Promise<string> {
-    const replyCursor = this.latestReplyCursor(address);
-    const [kind, idStr] = address.split(':');
-    const id = Number(idStr);
-    const paramsBase: Record<string, unknown> =
-      kind === 'group' ? { message_type: 'group', group_id: id } : { message_type: 'private', user_id: id };
-    const segs0: Array<Record<string, unknown>> = [];
-    if (replyMessageId != null) segs0.push({ type: 'reply', data: { id: replyMessageId } });
-    if (atQQs && atQQs.length) for (const qq of atQQs) segs0.push({ type: 'at', data: { qq } });
-    const cfg = this.voiceRuntime();
-    let sentences = splitIntoSentences(text);
-    const limit = address.startsWith('private:') ? this.config.maxPrivateMessagesPerReply : 0;
-    if (limit > 0) {
-      const remaining = Math.max(0,limit - (counts.get(address) ?? 0));
-      if (!remaining) return QQWorld.SEND_BLOCKED + '私聊本轮回复已达 ' + limit + ' 条上限，请等待下一轮消息，不要重试。';
-      if (sentences.length > remaining) {
-        const size = Math.ceil(sentences.length / remaining);
-        sentences = Array.from({length:Math.ceil(sentences.length / size)},(_,i)=>sentences.slice(i*size,(i+1)*size).join(''));
-      }
-    }
-    let count = 0;
-    for (let i = 0; i < sentences.length; i++) {
-      if (this.host?.isPaused?.()) break;
-      const quiet = this.checkQuiet(address);
-      if (quiet) return quiet;
-      const s = sentences[i];
-      const rec = await synthesizeVoice(s, address, this.driver!, cfg, this.log);
-      const segs = [...segs0];
-      if (rec && rec.data && (rec.data as { file?: string }).file) {
-        segs.push(rec as unknown as Record<string, unknown>);
-      } else {
-        // 单句合成失败：退化为文字，保证信息不丢
-        segs.push({ type: 'text', data: { text: s } } as unknown as Record<string, unknown>);
-      }
-      try {
-        if (this.host?.isPaused?.()) break;
-        const quiet = this.checkQuiet(address);
-        if (quiet) return quiet;
-        const r: any = await this.sendMessage(address, { ...paramsBase, message: segs }, counts, beforeSend);
-        if (r?.message_id != null) {
-          this.knownMessages.set(String(r.message_id), { conv: address, ts: Date.now() });
-          this.scheduleSaveState();
-        }
-        count++;
-      } catch (e) {
-        this.log.warn('流式语音分段发送失败', { err: String(e), address, i });
-      }
-      // 引用/at 仅作用于首段，后续段不再带，避免每条都引用同一条
-      segs0.length = 0;
-      if (i < sentences.length - 1) await sleep(this.config.call.chunkGapMs);
-    }
-    this.resetCallIdle(address);
-    this.recordGroupSpeak(address);
-    if (count > 0) this.recordAntiLoop(address, replyCursor);
-    this.dedupSends.set(address, { norm: text.replace(/\s+/g, ' ').trim(), ts: Date.now() });
-    return `已向 ${this.convLabel(address)} 流式发送语音 ${count}/${sentences.length} 段。`;
-  }
-
-  /** 来电接听：若本地语音模型已就绪则直接接听；否则进入"接通中"，等待（随侧车/模型初始化）就绪后接听。 */
-  private async startCall(address: string): Promise<void> {
-    if (this.host?.isPaused?.()) return;
-    if (this.checkQuiet(address)) return;
-    if (this.inCall.has(address) || this.pendingCall.has(address)) return;
-    // 已就绪：直接接听
-    if (await this.isCallReady()) {
-      await this.answerCall(address);
-      return;
-    }
-    // 未就绪：进入"接通中"，先发"正在接通"提示，并尝试拉起/等待本地语音模型初始化完成后再接听
-    this.pendingCall.add(address);
-    this.pendingAbort.delete(address);
-    await this.sendTo(address, this.config.call.loadingText || '喂？稍等，我正在接通…');
-    // 若启用侧车自拉起且当前 TTS 引擎确为 voxcpm，才把 vox_tts_server.py 拉起来（返回 true 表示本次新拉起，需给更长的模型加载时间）
-    let waitSec = this.config.call.initTimeoutSec;
-    if (this.config.voxcpmSidecar.enabled && this.voiceRuntime().provider === 'voxcpm') {
-      const launched = await this.ensureSidecarLaunched();
-      if (launched) waitSec = Math.max(waitSec, this.config.voxcpmSidecar.startupTimeoutSec);
-    }
-    if (waitSec <= 0) {
-      // 配置为不等待：立即按"未就绪"处理（婉拒）
-      this.pendingCall.delete(address);
-      this.pendingAbort.delete(address);
-      await this.sendTo(address, this.config.call.notReadyText);
-      return;
-    }
-    const ready = await this.waitVoiceReady(address, waitSec);
-    this.pendingCall.delete(address);
-    this.pendingAbort.delete(address);
-    if (ready) {
-      await this.answerCall(address);
-    } else {
-      await this.sendTo(address, this.config.call.notReadyText);
-    }
-  }
-
-  /** 等待本地语音模型就绪（轮询），期间可被 pendingAbort 取消；返回最终是否就绪。 */
-  private async waitVoiceReady(address: string, timeoutSec: number): Promise<boolean> {
-    const deadline = Date.now() + Math.max(0, timeoutSec) * 1000;
-    const interval = 800;
-    while (Date.now() < deadline) {
-      if (this.pendingAbort.get(address) === true || this.host?.isPaused?.()) return false;
-      if (await this.isCallReady()) return true;
-      await sleep(interval);
-    }
-    return this.pendingAbort.get(address) !== true && (await this.isCallReady());
-  }
-
-  /** 接听招呼语：留空则交 AI 根据情境自动生成开场白，否则用配置里的固定文案。 */
-  private async callGreeting(address: string): Promise<string> {
-    const fixed = (this.config.call.greeting || '').trim();
-    if (fixed) return fixed;
-    return (await this.generateCallLine(address, 'greeting')) || '喂？我在的，你想聊点什么~';
-  }
-
-  /** 挂断告别语：留空则交 AI 自动生成，否则用配置里的固定文案。 */
-  private async callFarewell(address: string): Promise<string> {
-    const fixed = (this.config.call.farewell || '').trim();
-    if (fixed) return fixed;
-    return (await this.generateCallLine(address, 'farewell')) || '好嘞，那我先挂啦，拜拜~';
-  }
-
-  /** 用 LLM（情绪/主动说话同款 chat 端点）生成一句通话开场/收尾语；失败返回 null（由调用方回退固定文案）。 */
-  private async generateCallLine(address: string, kind: 'greeting' | 'farewell'): Promise<string | null> {
-    const em = this.config.emotion;
-    if (!em.endpoint || !em.apiKeySecret) {
-      this.log.warn('call 语生成跳过：emotion.endpoint/apiKeySecret 未配置');
-      return null;
-    }
-    const label = address;
-    const sys =
-      '你是用户的 AI 伴侣，正通过语音通话和' + label + '聊天。请用一句简短、口语化、自然、像真在打电话一样的语气' +
-      (kind === 'greeting'
-        ? '主动先开口接听并自然开场（别客套废话，可结合当下情境/情绪，一句话）。'
-        : '自然地结束通话并告别（简短温暖，别生硬，一句话）。') +
-      ' 只输出那一句话本身，不要加引号、不要解释、不要换行。';
-    const user =
-      kind === 'greeting'
-        ? '（用户刚刚拨通了和你的语音通话，现在轮到你先开口说第一句。）'
-        : '（通话要结束了，你来说最后一句告别的话。）';
-    const messages: ChatMsg[] = [
-      { role: 'system', content: sys },
-      { role: 'user', content: user },
-    ];
-    const text = await this.completeChat(em.endpoint, em.apiKeySecret, em.model, messages, { temperature: 1.0, maxTokens: 80 });
-    return text ? text.replace(/\s+/g, ' ').trim() : null;
-  }
-
-  /** 正式接听：进入通话态、注入通话语气提示、说招呼语（招呼语会被强制语音+流式发送）。 */
-  private async answerCall(address: string): Promise<void> {
-    if (this.host?.isPaused?.()) return;
-    if (this.config.call.mode === 'system') {
-      if (!await this.callBridgeEnter(address)) return;
-      if (this.host?.isPaused?.()) { await this.callBridgeExit(address); return; }
-    }
-    this.inCall.add(address);
-    this.publishCallAudioState();
-    this.resetCallIdle(address);
-    // 注入通话语气提示，让模型像打电话一样简短口语化
-    try {
-      await this.host!.pushEvent({
-        type: 'system',
-        source: SOURCE,
-        senderKey: address,
-        text: '（你现在和用户处于语音通话中。请用口语化、自然、像打电话一样的语气回复；每次别太长，一句一句地说，方便对方听清。如果对方说“挂电话/再见/拜拜”之类就结束通话。）',
-        origin: 'internal',
-      } as any, { trigger: 'piggyback' });
-    } catch (e) {
-      this.log.warn('通话提示注入失败 ' + String(e));
-    }
-    if (this.config.call.mode === 'system') {
-      // 系统级真接电话：启动音频桥 + 实时听写循环；招呼语会经 sendTo→systemSpeak 实时播报给通话对面
-      await this.startSystemCallLoop(address);
-    }
-    await this.sendTo(address, await this.callGreeting(address));
-  }
-
-  /** 挂断：退出通话态并说告别语。 */
-  private async endCall(address: string): Promise<void> {
-    const systemMode = this.config.call.mode === 'system' && this.inCall.has(address);
-    if (systemMode) {
-      try { await this.sendTo(address, await this.callFarewell(address)); }
-      finally {
-        this.inCall.delete(address);
-        this.clearCallIdle(address);
-        await this.callBridgeExit(address, true);
-        this.publishCallAudioState();
-      }
-      return;
-    }
-    this.inCall.delete(address);
-    this.publishCallAudioState();
-    this.clearCallIdle(address);
-    await this.sendTo(address, await this.callFarewell(address));
-  }
-
-  /** 本地语音模型就绪判定：voxcpm 走 /health（须 ready=true 且非 error 态）；其它供应商走 checkVoiceDeps。 */
-  private async isCallReady(): Promise<boolean> {
-    const v = this.config.voice;
-    if (!v.enabled || !v.asr || !v.tts) return false;
-    const cfg = this.voiceRuntime();
-    // 就绪判定交给当前选中的语音供应商（见 voice.ts 的 checkReady/checkDeps），不写死任何具体供应商。
-    return voiceReady(cfg, this.log);
-  }
-
-  // ================= 系统级真接电话（system 模式）=================
-  // 与 simulated(语音消息模拟) 不同：system 模式动真实 QQ 客户端 + 系统音频桥(call_bridge.py)。
-  // 对方声音从 WASAPI Loopback 抓取、经 call_bridge 的 /partner_audio 取回；AI 的 TTS 经 /feed_tts 喂给
-  // CABLE Input（QQ 通话麦克风选 CABLE Output 即采到）。双向对话靠把"对方转写文本"push 成 qq.message
-  // 复用现有 LLM 管线；挂断词由 handleIncomingMessage 的 inCall 分支自动处理。
-
-  private callBridgeBase(): string {
-    return this.config.call.bridgeUrl || 'http://127.0.0.1:8799';
-  }
-
-  /** system 模式：进入通话 → 驱动音频桥启动 loopback 抓取 + CABLE 播放通道 */
-  private async callBridgeEnter(address: string): Promise<boolean> {
-    if (!await this.ensureAudioBridge()) return false;
-    try {
-      const status = await (await fetch(`${this.callBridgeBase()}/status`, { signal: AbortSignal.timeout(3000) })).json() as any;
-      if (!status.ready || status.incoming?.address !== address || typeof status.incoming.callId !== 'string') return false;
-      const r = await fetch(`${this.callBridgeBase()}/enter`, {
-        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(status.incoming),
-        signal: AbortSignal.timeout(15000),
-      });
-      const j = (await r.json().catch(() => null)) as { ok?: boolean; route?: unknown; started?: unknown } | null;
-      this.log.info('call_bridge enter', { address, ok: j?.ok, started: j?.started, route: j?.route });
-      return r.ok && j?.ok === true;
-    } catch (e) {
-      this.log.warn('call_bridge enter 失败（音频桥服务未启动？请先运行 call_bridge.py）', { err: String(e), address });
-      return false;
-    }
-  }
-
-  private async pollNativeCall(): Promise<void> {
-    if (!this.config.call.enabled || this.config.call.mode !== 'system') return;
-    if (this.config.call.answerMethod === 'liteloader') return;
-    if (!await this.ensureAudioBridge()) return;
-    const response = await fetch(this.callBridgeBase() + '/status', { signal: AbortSignal.timeout(3000) });
-    if (!response.ok) return;
-    const status = await response.json() as { ready?: boolean; incoming?: { address?: string; callId?: string }; active?: { address?: string } };
-    if (!status.incoming) this.nativeCallId = '';
-    for (const address of [...this.inCall]) {
-      if (status.active?.address !== address || this.host?.isPaused?.()) {
-        this.inCall.delete(address);
-        this.clearCallIdle(address);
-        await this.callBridgeExit(address);
-        this.publishCallAudioState();
-      }
-    }
-    if (this.host?.isPaused?.() || !status.ready || status.active || this.inCall.size || this.pendingCall.size) return;
-    const incoming = status.incoming;
-    if (!incoming?.address || !incoming.callId || incoming.callId === this.nativeCallId) return;
-    if (!incoming.address.startsWith('private:') || !toIds(this.config.privates).includes(Number(incoming.address.slice(8)))) return;
-    this.nativeCallId = incoming.callId;
-    await this.startCall(incoming.address);
-  }
-
-  /** system 模式：退出通话 → 停「听」管线 + 停 loopback + 关播放 + 还原路由 */
-  private async callBridgeExit(address: string, drain = false): Promise<void> {
-    this.systemListeners.get(address)?.stop();
-    this.systemListeners.delete(address);
-    try {
-      const r = await fetch(`${this.callBridgeBase()}/exit`, {
-        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ drain }), signal: AbortSignal.timeout(35000),
-      });
-      const j = (await r.json().catch(() => null)) as { ok?: boolean } | null;
-      this.log.info('call_bridge exit', { address, ok: j?.ok });
-    } catch (e) {
-      this.log.warn('call_bridge exit 失败', { err: String(e), address });
-    }
-  }
-
-  /** 确保音频桥(call_bridge.py)进程存活：不在则自动拉起（自愈，避免桥崩后整通电话静音）。 */
-  private async ensureAudioBridge(): Promise<boolean> {
-    const base = this.callBridgeBase();
-    // 1) 已在运行则跳过
-    try {
-      const r = await fetch(base + '/status', { signal: AbortSignal.timeout(2000) });
-      if (r.ok) return true;
-    } catch { /* 不在，准备拉起 */ }
-    // 2) 解析脚本与 python：优先用 call.bridgeScript / call.bridgePython（部署可配置）；
-    //    未配置则按"扩展目录向上回溯"在常见布局里自动找（不写死任何机器绝对路径，发布版干净）。
-    const cfg = this.config.call;
-    if (process.platform !== 'win32' && !cfg.bridgeScript?.trim()) {
-      this.log.warn('[audio-bridge] 内置自动探测仅适用于 Windows 原生电话；Linux 请使用语音消息，或配置并启动兼容的外部 bridgeUrl');
-      return false;
-    }
-    const script = (cfg.bridgeScript && cfg.bridgeScript.trim()) || this.findBridgeScript();
-    if (!script) {
-      this.log.warn('[audio-bridge] 未配置 call.bridgeScript 且未自动找到 call_bridge.py，跳过自动拉起；请在 call.bridgeScript 指定脚本路径或手动启动桥');
-      return false;
-    }
-    const python = (cfg.bridgePython && cfg.bridgePython.trim()) || this.findBridgePython() || (process.platform === 'win32' ? 'python' : 'python3');
-    // 3) 端口若被占用（旧桥僵尸）则放弃，避免重复拉起抢占
-    try {
-      if (await this.portInUse('127.0.0.1', 8799)) {
-        this.log.warn('[audio-bridge] 端口 8799 已被占用，疑似旧桥未退出，跳过自动拉起（请先结束占用进程）');
-        return false;
-      }
-    } catch { /* ignore */ }
-    // 4) 拉起（detached + unref：Cortico 重启后桥仍可服务；崩溃后下次通话由 ensure 自愈）
-    try {
-      const logFile = join(this.dataDir || dirname(script), 'call_bridge.log');
-      this.audioBridgeProc = await spawnLoggedProcess(python, [script], {
-        cwd: dirname(script),
-        env: { ...process.env },
-        logFile,
-        onError: error => this.log.warn('[audio-bridge] 子进程错误', {err: String(error)}),
-      });
-      this.log.info('[audio-bridge] 已拉起', { script, pid: this.audioBridgeProc.pid });
-    } catch (e) {
-      this.log.warn('[audio-bridge] 拉起失败', { err: String(e) });
-      return false;
-    }
-    // 5) 轮询探活（最多 8s）
-    const deadline = Date.now() + 8000;
-    while (Date.now() < deadline) {
-      await new Promise((res) => setTimeout(res, 500));
-      try {
-        const r = await fetch(base + '/status', { signal: AbortSignal.timeout(2000) });
-        if (r.ok) return true;
-      } catch { /* not yet */ }
-    }
-    this.log.warn('[audio-bridge] 拉起后探活超时（端口未就绪）');
-    return false;
-  }
-
-  /** 向上回溯扩展目录，在常见布局里找 call_bridge.py（audio_bridge_poc/ 或 qq_bot/audio_bridge_poc/）。不写死任何机器绝对路径。 */
-  private findBridgeScript(): string {
-    let dir = this.packageDir;
-    for (let i = 0; i < 6; i++) {
-      for (const rel of ['audio_bridge_poc/call_bridge.py', 'qq_bot/audio_bridge_poc/call_bridge.py']) {
-        const p = join(dir, ...rel.split('/'));
-        if (existsSync(p)) return p;
-      }
-      const parent = dirname(dir);
-      if (parent === dir) break;
-      dir = parent;
-    }
-    return '';
-  }
-
-  /** 向上回溯扩展目录找可用的 python 解释器（优先 venv_vox）。找不到回退 'python'（依赖 PATH）。 */
-  private findBridgePython(): string {
-    let dir = this.packageDir;
-    for (let i = 0; i < 6; i++) {
-      for (const rel of ['venv_vox', 'audio_bridge_poc/venv_vox', 'venv']) {
-        const p = venvPython(join(dir, ...rel.split('/')));
-        if (existsSync(p)) return p;
-      }
-      const parent = dirname(dir);
-      if (parent === dir) break;
-      dir = parent;
-    }
-    return '';
-  }
-
-  /** system 模式：把 AI 合成的 WAV 喂给 CABLE Input（让 QQ 通话采到 AI 声音） */
-  private async callBridgeFeedTts(buf: Buffer): Promise<boolean> {
-    const tryOnce = async (): Promise<boolean> => {
-      try {
-        const r = await fetch(`${this.callBridgeBase()}/feed_tts`, {
-          method: 'POST', headers: { 'content-type': 'audio/wav' }, body: new Uint8Array(buf), signal: AbortSignal.timeout(10000),
-        });
-        const j = (await r.json().catch(() => null)) as { ok?: boolean; reason?: string } | null;
-        if (!j?.ok) this.log.warn('call_bridge feed_tts 失败', { reason: j?.reason });
-        return !!j?.ok;
-      } catch (e) {
-        this.log.warn('call_bridge feed_tts 异常', { err: String(e) });
-        return false;
-      }
-    };
-    const ok = await tryOnce();
-    if (ok) return true;
-    // 自愈：桥可能崩了，自动拉起后重试一次
-    const relaunched = await this.ensureAudioBridge();
-    return relaunched ? await tryOnce() : false;
-  }
-
-  /** system 模式：拉取最近累积的对方声音 PCM 帧（base64 16-bit@16k），逐帧喂 AudioListener 切句 */
-  private async callBridgePartnerFrames(): Promise<Int16Array[] | null> {
-    try {
-      const r = await fetch(`${this.callBridgeBase()}/partner_frames`, { signal: AbortSignal.timeout(5000) });
-      const j = (await r.json().catch(() => null)) as { ok?: boolean; frames?: string[] } | null;
-      if (!j?.ok || !Array.isArray(j.frames)) return null;
-      return j.frames.map((s) => {
-        const buf = Buffer.from(s, 'base64');
-        // base64 解码后的 Buffer 通常独立 ArrayBuffer 从 0 开始；切片保证 Int16 对齐安全
-        const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
-        return new Int16Array(ab);
-      });
-    } catch (e) {
-      this.log.warn('call_bridge partner_frames 异常', { err: String(e) });
-      return null;
-    }
-  }
-
-  /** 通话复用当前语音供应商，只有返回音频的供应商可接入音频桥。 */
-  private async synthesizeToWav(text: string): Promise<Buffer | null> {
-    const cfg = this.voiceRuntime();
-    const record = await synthesizeVoice(text, 'private:0', this.driver!, cfg, this.log);
-    const file = record?.data?.file;
-    if (typeof file !== 'string' || !file.startsWith('base64://')) return null;
-    const wav = Buffer.from(file.slice(9), 'base64');
-    return wav.subarray(0, 4).toString() === 'RIFF' ? wav : null;
-  }
-
-  /** system 模式：把文本按句拆分，逐句合成逐句经音频桥喂给通话对面，形成流式语音效果（更像真通话）。 */
-  private async systemSpeak(address: string, text: string): Promise<string> {
-    const norm = text.replace(/\s+/g, ' ').trim();
-    const prev = this.dedupSends.get(address);
-    if (prev && prev.norm === norm && Date.now() - prev.ts < 6000) {
-      this.log.info('systemSpeak 去重：跳过 6s 内相同内容', { address });
-      return '（去重：与刚播报的内容相同，已跳过）';
-    }
-    // 按句末标点切句，逐句合成逐句喂：第一句更早被听到、整段按序播放（桥侧播放队列保证不重叠）。
-    const sentences = splitIntoSentences(norm).filter((s) => s.trim().length > 0);
-    if (sentences.length === 0) return '（空内容，未播报）';
-    let okCount = 0;
-    let firstBytes = 0;
-    for (const s of sentences) {
-      if (this.host?.isPaused?.() || !this.inCall.has(address) || this.checkReplyMode(address)) break;
-      const wav = await this.synthesizeToWav(s);
-      if (this.host?.isPaused?.() || !this.inCall.has(address) || this.checkReplyMode(address)) break;
-      if (!wav) {
-        this.log.warn('systemSpeak 分句合成失败，跳过该句', { sentence: s.slice(0, 24) });
-        continue;
-      }
-      const ok = await this.callBridgeFeedTts(wav);
-      if (ok) {
-        okCount++;
-        if (okCount === 1) firstBytes = wav.length;
-      }
-    }
-    if (okCount === 0) return '（system 合成失败，未播报）';
-    this.dedupSends.set(address, { norm, ts: Date.now() });
-    this.resetCallIdle(address);
-    return `已向 ${this.convLabel(address)}（系统级通话）分句流式播报 ${okCount}/${sentences.length} 句。`;
-  }
-
-  /** system 模式：启动「听」管线（loopback 抓对方声 → AudioListener 切句/识别/并句 → 转写文本 push 为 qq.message 驱动 LLM）。
-   *  ASR 来源按 asr.mode 决定：cloud=远端 OpenAI 兼容端点；local=本扩展拉起的本地侧车；off=仅单向播报。 */
-  private async startSystemCallLoop(address: string): Promise<void> {
-    const asr = this.config.asr;
-    // 解析 ASR 模式（顶层 asr.* 共享配置）
-    let mode: 'off' | 'cloud' | 'local' = asr.mode;
-    let cloudUrl = (asr.cloudUrl || '').trim();
-    let recognizer: HttpRecognizer | null = null;
-    if (mode === 'cloud') {
-      if (!cloudUrl) {
-        this.log.warn('system 通话：asr.mode=cloud 但未配置 asr.cloudUrl，将仅单向播报（AI 说话给对方面，听不到对方）。');
-      } else {
-        const key = asr.cloudApiKeySecret ? (this.resolveSecret(asr.cloudApiKeySecret) ?? '') : '';
-        const rawWav = asr.cloudFormat === 'wav';
-        recognizer = new HttpRecognizer(rawWav ? cloudUrl.replace(/\/+$/, '') + '/asr' : cloudUrl, {
-          apiKey: key || undefined, model: asr.cloudModel || undefined, rawWav, timeoutMs: asr.transcribeTimeout, log: this.log,
-        });
-        this.log.info('system 听写：云端 ASR', { url: cloudUrl, model: asr.cloudModel, hasKey: !!key });
-      }
-    } else if (mode === 'local') {
-      const localUrl = await this.ensureAsrSidecarAndReady();
-      if (localUrl) {
-        recognizer = new HttpRecognizer(localUrl, { log: this.log });
-        this.log.info('system 听写：本地 ASR 侧车', { url: localUrl });
-      } else {
-        this.log.warn('system 通话：asr.mode=local 但本地 ASR 侧车未能就绪，将仅单向播报（AI 说话给对方面，听不到对方）。请检查 asr.local* 配置与依赖。');
-      }
-    } else {
-      this.log.warn('system 通话：ASR 未配置（asr.mode=off），将仅单向播报（AI 说话给对方面，听不到对方）。配置 asr.mode=cloud/local 后自动启用实时听写。');
-    }
-    const listener = new AudioListener(
-      recognizer,
-      (text) => {
-        if (!this.inCall.has(address) || this.host?.isPaused?.() || !this.canRead(address)) return;
-        this.resetCallIdle(address);
-        if (matchAnyWord(text.toLowerCase(), this.config.call.hangupWords)) { void this.endCall(address); return; }
-        this.log.info(`system 听写：${text}`, { address });
-        void this.pushIncomingMessage({
-          type: 'qq.message',
-          ts: eventTs(this.config.timezone),
-          source: SOURCE,
-          text,
-          senderKey: address,
-          meta: { conv: address, sender: '通话对方', role: 'user' },
-        });
-      },
-      this.log,
-    );
-    listener.start();
-    this.systemListeners.set(address, listener);
-    void this._systemLoopTick(address);
-  }
-
-  /** system 模式：拉取对方声音 PCM 帧并逐帧喂 AudioListener（识别/切句/并句全在 AudioListener 内闭环）。 */
-  private async _systemLoopTick(address: string): Promise<void> {
-    const POLL_MS = 50;
-    const listener = this.systemListeners.get(address);
-    if (!listener) return;
-    while (this.inCall.has(address) && this.systemListeners.has(address)) {
-      try {
-        const frames = await this.callBridgePartnerFrames();
-        if (frames) {
-          for (const f of frames) listener.pushFrame(f);
-        }
-      } catch (e) {
-        this.log.warn('system 听写循环异常', { err: String(e), address });
-      }
-      await sleep(POLL_MS);
-    }
-  }
-
-  /** 解析 voice.voxcpmUrl 的 host/port（供侧车拉起时对齐监听地址）。 */
-  private voxcpmHostPort(): { host: string; port: number } {
-    try {
-      const u = new URL(this.config.voice.voxcpmUrl || 'http://127.0.0.1:8765');
-      return { host: u.hostname || '127.0.0.1', port: u.port ? parseInt(u.port, 10) : 8765 };
-    } catch {
-      return { host: '127.0.0.1', port: 8765 };
-    }
-  }
-
-  /** 探测某 host:port 是否已被监听（侧车可能已在运行/被别的进程拉起）。 */
-
-  private portInUse(host: string, port: number): Promise<boolean> {
-    return new Promise((resolve) => {
-      const sock = createConnection({ host, port });
-      let done = false;
-      const finish = (v: boolean) => { if (!done) { done = true; sock.destroy(); resolve(v); } };
-      sock.once('connect', () => finish(true));
-      sock.once('error', () => finish(false));
-      sock.setTimeout(1000, () => finish(false));
-    });
-  }
-
-  /** 解析侧车依赖路径；缺失（venv/python/权重/ffmpeg）返回 null。不写死任何机器路径：全部由 voxcpmSidecar.* 配置与环境变量决定，仅在未配置时按"扩展目录向上回溯到 qq_bot/Fat-Fish/feiyu_standalone"这一常见目录布局做相对探测。 */
-  private resolveSidecar(): { python: string; script: string; modelDir: string; ffmpeg: string; logFile: string } | null {
-    const cfg = this.config.voxcpmSidecar;
-    let script = (cfg.script || '').trim();
-    if (!script) {
-      // 相对探测：把扩展目录向上回溯 4 级（extensions/{node_modules,packages}/<扩展包> → 工作区根），再按常见布局找脚本
-      const candidates = [
-        join(this.packageDir, '..', '..', '..', '..', 'qq_bot', 'vox_tts_server.py'),
-        join(this.packageDir, '..', '..', '..', '..', 'Fat-Fish', 'libs', 'qq_bot_runtime', 'vox_tts_server.py'),
-        join(this.packageDir, '..', '..', '..', '..', 'feiyu_standalone', 'libs', 'qq_bot_runtime', 'vox_tts_server.py'),
-      ];
-      script = candidates.find((c) => existsSync(c)) || '';
-    }
-    if (!script || !existsSync(script)) {
-      this.log.warn('[voxcpm-sidecar] 未找到 vox_tts_server.py，请在 worlds.qqbot.voxcpmSidecar.script 配置绝对路径');
-      return null;
-    }
-    const scriptDir = dirname(script);
-    // 解释器优先级：显式 python > 显式 venv 推导 > 脚本目录/上级目录下的 venv_vox/venv
-    let python = (cfg.python || '').trim();
-    if (!python && cfg.venv && cfg.venv.trim()) {
-      python = venvPython(cfg.venv.trim());
-    }
-    if (!python) {
-      const venvCands = [
-        join(scriptDir, 'venv_vox'),
-        join(scriptDir, 'venv'),
-        join(scriptDir, '..', 'venv_vox'),
-        join(scriptDir, '..', '..', 'venv_vox'),
-      ];
-      python = findVenvPython(venvCands) || venvPython(join(scriptDir, 'venv_vox'));
-    }
-    if (!existsSync(python)) {
-      this.log.warn('[voxcpm-sidecar] 未找到 python 解释器：' + python + '（可在 worlds.qqbot.voxcpmSidecar.venv / .python 指定）');
-      return null;
-    }
-    // 权重目录：显式 > 环境变量 VOXCPM_MODEL_DIR > 脚本目录 models/VoxCPM2（不写死任何机器路径）
-    let modelDir = (cfg.modelDir || '').trim();
-    if (!modelDir) {
-      const mdCands = [
-        process.env.VOXCPM_MODEL_DIR || '',
-        join(scriptDir, 'models', 'VoxCPM2'),
-      ];
-      modelDir = mdCands.find((c) => c && existsSync(join(c, 'model.safetensors'))) || '';
-    }
-    if (!modelDir || !existsSync(join(modelDir, 'model.safetensors'))) {
-      this.log.warn('[voxcpm-sidecar] 未找到 VoxCPM 权重 model.safetensors：' + modelDir + '（可在 worlds.qqbot.voxcpmSidecar.modelDir 指定，或设置环境变量 VOXCPM_MODEL_DIR）');
-      return null;
-    }
-    // ffmpeg：显式配置优先；未配置则留空，由 vox_tts_server.py 自行在 PATH 中探测 ffmpeg（不写死具体路径/版本）
-    let ffmpeg = (cfg.ffmpeg || '').trim();
-    if (!ffmpeg) {
-      ffmpeg = '';
-    }
-    const logFile = (cfg.logFile || '').trim() || join(this.dataDir || scriptDir, 'vox_tts_server.log');
-    return { python, script, modelDir, ffmpeg, logFile };
-  }
-
-  /** 拉起 voxcpm 侧车子进程（若启用且端口未被占用/尚未运行）。返回本次是否"新拉起"（用于决定等待时长）。 */
-  private async ensureSidecarLaunched(): Promise<boolean> {
-    const cfg = this.config.voxcpmSidecar;
-    if (!cfg.enabled) return false;
-    if (this.sidecarProc && this.sidecarProc.exitCode === null && this.sidecarProc.signalCode === null) {
-      return false; // 本扩展已拉起且在跑
-    }
-    const { host, port } = this.voxcpmHostPort();
-    if (await this.portInUse(host, port)) {
-      this.log.warn(`[voxcpm-sidecar] 端口 ${port} 已被占用（侧车可能已在运行），跳过拉起`);
-      return false;
-    }
-    const info = this.resolveSidecar();
-    if (!info) {
-      this.log.warn('[voxcpm-sidecar] 依赖不全，跳过自动拉起；如需自动拉起请检查 voxcpmSidecar 配置，或手动启动侧车');
-      return false;
-    }
-    try {
-      const env = { ...process.env } as Record<string, string>;
-      if (info.ffmpeg) env.VOXCPM_FFMPEG = info.ffmpeg;
-      env.VOXCPM_MODEL_DIR = info.modelDir;
-      this.sidecarProc = await spawnLoggedProcess(info.python, [info.script, String(port), host], {
-        cwd: dirname(info.script),
-        env,
-        logFile: info.logFile,
-        onError: error => this.log.warn('[voxcpm-sidecar] 子进程错误：' + String(error)),
-      });
-      this.sidecarLaunchedAt = Date.now();
-      const launchedProcess = this.sidecarProc;
-      this.sidecarProc.on('exit', (code, sig) => {
-        this.log.warn(`[voxcpm-sidecar] 子进程退出 code=${code} signal=${sig}`);
-        if (this.sidecarProc === launchedProcess) this.sidecarProc = null;
-      });
-      this.log.warn(`[voxcpm-sidecar] 已拉起 vox_tts_server.py (pid=${this.sidecarProc.pid})，正在加载模型，等待 /health ready…`);
-      return true;
-    } catch (e) {
-      this.log.warn('[voxcpm-sidecar] 拉起失败：' + String(e));
-      this.sidecarProc = null;
-      return false;
-    }
-  }
-
-  /** 本地 ASR 侧车监听地址（asr.localPort）。 */
-  private asrHostPort(): { host: string; port: number } {
-    return { host: '127.0.0.1', port: this.config.asr.localPort || 8778 };
-  }
-
-  /** 在 extensions/{node_modules,packages}/* 下按目录扫描 asr_sidecar.py。不写死包名，改名或换目录布局都能找到。 */
-  private scanAsrScript(): string {
-    let dir = this.packageDir;
-    for (let i = 0; i < 6; i += 1) {
-      const ext = join(dir, 'extensions');
-      for (const sub of ['node_modules', 'packages']) {
-        const base = join(ext, sub);
-        if (!existsSync(base)) continue;
-        let names: string[] = [];
-        try { names = readdirSync(base); } catch { continue; }
-        for (const name of names) {
-          if (name.startsWith('.')) continue;
-          const c = join(base, name, 'asr_sidecar.py');
-          if (existsSync(c)) return c;
-        }
-      }
-      const up = dirname(dir);
-      if (up === dir) break;
-      dir = up;
-    }
-    return '';
-  }
-
-  /** 探测本地 ASR 侧车依赖：python 解释器 + asr_sidecar.py + 模型目录。不写死任何机器路径：全部由 asr.local* 配置与环境变量决定。 */
-  private resolveAsrSidecar(): { python: string; script: string; modelPath: string; engine: string } | null {
-    const asr = this.config.asr;
-    // 优先在本扩展真实目录（EXT_ROOT，从模块位置推算，不受 packageDir 指错影响）找脚本，
-    // packageDir 仅作兜底候选（不含任何绝对机器路径）。
-    const scriptCands = [
-      join(EXT_ROOT, 'asr_sidecar.py'),
-      join(EXT_ROOT, 'src', 'asr_sidecar.py'),
-      join(this.packageDir, 'asr_sidecar.py'),
-      join(this.packageDir, 'src', 'asr_sidecar.py'),
-    ];
-    let script = '';
-    for (const c of scriptCands) {
-      if (existsSync(c)) { script = c; break; }
-    }
-    if (!script) {
-      this.log.warn('[asr-sidecar] 找不到 asr_sidecar.py（仅从本扩展目录查找）：' + scriptCands.join(' ; '));
-      return null;
-    }
-    // venv：显式配置 > 包相对探测（<扩展>/venv_vox 或 <扩展>/venv），不写死任何机器路径
-    const python = this.resolveAsrPython();
-    if (!existsSync(python)) {
-      this.log.warn('[asr-sidecar] 未找到 python 解释器：' + python + '（请在 asr.localVenv 配置 venv 目录，或把 venv 放到 <扩展>/venv_vox）');
-      return null;
-    }
-    // 引擎名先算：模型目录默认名与之相关。
-    const engine = (asr.localEngine || 'funasr').toLowerCase();
-    // 模型目录：显式配置 > 环境变量 QQBOT_ASR_MODEL_DIR > <扩展>/models/<默认模型名>。
-    // 默认模型名：sherpaOnnx 用 sherpa-onnx-sense-voice（约 228MB 量化版，需先下载）；
-    // 其余引擎（funasr 自动下载、vosk/fasterWhisper 需本地目录）留空，由 env 或 localModelPath 决定。
-    const defModelName = process.env.QQBOT_ASR_MODEL_NAME || (engine === 'sherpaonnx' ? 'sherpa-onnx-sense-voice' : '');
-    let modelPath = (asr.localModelPath || '').trim();
-    if (!modelPath || !existsSync(modelPath)) {
-      const mdCands = [
-        process.env.QQBOT_ASR_MODEL_DIR || '',
-        join(EXT_ROOT, 'models', defModelName),
-        join(this.packageDir, 'models', defModelName),
-      ];
-      modelPath = mdCands.find((c) => c && existsSync(c)) || '';
-    }
-    // 模型目录可选的引擎（运行时自动下载/内置，无需本地目录）：集中登记，新增引擎在此加，
-    // 除此外的引擎（如 vosk/fasterWhisper）必须在 asr.localModelPath 提供有效目录。
-    const OPTIONAL_MODEL_ENGINES = ['funasr'];
-    const requireModel = !OPTIONAL_MODEL_ENGINES.includes(engine);
-    if (requireModel && (!modelPath || !existsSync(modelPath))) {
-      this.log.warn('[asr-sidecar] 未找到 ASR 模型目录（请在 asr.localModelPath 指定，或设置环境变量 QQBOT_ASR_MODEL_DIR）');
-      return null;
-    }
-    return { python, script, modelPath, engine: asr.localEngine };
-  }
-
-  /** 拉起本地 ASR 侧车子进程（若尚未运行且端口空闲）。返回本次是否"新拉起"。 */
-  private async ensureAsrSidecarLaunched(): Promise<boolean> {
-    if (this.asrSidecar && this.asrSidecar.exitCode === null && this.asrSidecar.signalCode === null) return false;
-    const { host, port } = this.asrHostPort();
-    if (await this.portInUse(host, port)) {
-      this.log.warn(`[asr-sidecar] 端口 ${port} 已被占用（侧车可能已在运行），跳过拉起`);
-      return false;
-    }
-    const info = this.resolveAsrSidecar();
-    if (!info) {
-      this.log.warn('[asr-sidecar] 依赖不全，跳过自动拉起；请检查 asr.local* 配置，或手动启动侧车');
-      return false;
-    }
-    try {
-      const logFile = join(this.dataDir || dirname(info.script), 'asr_sidecar.log');
-      this.asrSidecar = await spawnLoggedProcess(
-        info.python,
-        [info.script, String(port), '--engine', info.engine, '--model-dir', info.modelPath],
-        {
-          cwd: dirname(info.script),
-          env: { ...process.env } as Record<string, string>,
-          logFile,
-          onError: error => this.log.warn('[asr-sidecar] 子进程错误：' + String(error)),
-        },
-      );
-      const launchedProcess = this.asrSidecar;
-      this.asrSidecar.on('exit', (code, sig) => {
-        this.log.warn(`[asr-sidecar] 子进程退出 code=${code} signal=${sig}`);
-        if (this.asrSidecar === launchedProcess) this.asrSidecar = null;
-      });
-      this.log.warn(`[asr-sidecar] 已拉起 asr_sidecar.py (pid=${this.asrSidecar.pid})，加载模型中，等待 /health ready…`);
-      return true;
-    } catch (e) {
-      this.log.warn('[asr-sidecar] 拉起失败：' + String(e));
-      this.asrSidecar = null;
-      return false;
-    }
-  }
-
-  /** 本地 ASR 侧车是否就绪（/health ready=true）。 */
-  private async isAsrReady(): Promise<boolean> {
-    const { host, port } = this.asrHostPort();
-    try {
-      const r = await fetch(`http://${host}:${port}/health`, { signal: AbortSignal.timeout(3000) });
-      if (!r.ok) return false;
-      const j = (await r.json().catch(() => null)) as { ready?: boolean } | null;
-      return !!j && j.ready === true;
-    } catch {
-      return false;
-    }
-  }
-
-  /** 确保本地 ASR 侧车就绪：已就绪直接返回地址；否则拉起并轮询 /health（新拉起给更长加载时间）。返回 null 表示失败。 */
-  private async ensureAsrSidecarAndReady(): Promise<string | null> {
-    const { host, port } = this.asrHostPort();
-    const base = `http://${host}:${port}`;
-    if (await this.isAsrReady()) return base;
-    const launched = await this.ensureAsrSidecarLaunched();
-    const timeoutSec = launched ? 60 : 8; // 新拉起（尤其 faster-whisper 首次）给更长加载时间
-    const deadline = Date.now() + timeoutSec * 1000;
-    while (Date.now() < deadline) {
-      if (await this.isAsrReady()) return base;
-      await sleep(800);
-    }
-    this.log.warn('[asr-sidecar] 等待 /health ready 超时');
-    return null;
-  }
-
-  private resetCallIdle(address: string): void {
-    this.clearCallIdle(address);
-    const sec = this.config.call.idleTimeoutSec;
-    if (sec > 0) {
-      const t = setTimeout(async () => {
-        if (this.inCall.has(address)) {
-          try { await this.endCall(address); }
-          catch (e) { this.log.warn('空闲通话结束失败', String(e)); }
-        }
-      }, sec * 1000);
-      this.callIdleTimers.set(address, t);
-    }
-  }
-
-  private publishCallAudioState(): void {
-    if (!this.dataDir) return;
-    const file = join(this.dataDir, 'native-call-audio.json');
-    mkdirSync(this.dataDir, {recursive:true});
-    writeFileSync(file+'.tmp', JSON.stringify({active:this.config.call.mode==='system' && this.inCall.size>0}));
-    renameSync(file+'.tmp', file);
-  }
-
-  private clearCallIdle(address: string): void {
-    const t = this.callIdleTimers.get(address);
-    if (t) {
-      clearTimeout(t);
-      this.callIdleTimers.delete(address);
-    }
   }
 
   /** 包装宿主：在 pushEvent 后向控制台事件流广播（仅广播本扩展产生的事件）。 */
@@ -4578,40 +3630,9 @@ const forwardById: ToolDef = {
       },
     };
 
-    const voicecall: ToolDef = {
-      name: 'qq_voicecall',
-      tags: ['write'],
-      barrierAfter: true,
-      description: '【语音通话(模拟)】接听或挂断一路“打电话”语音会话。action="start" 向某会话发起/接听语音通话（需控制台开启 call.enabled 且本地语音模型已就绪）；action="end" 主动挂断当前通话；action="status" 查看通话状态。to 填 "group:<群号>" 或 "private:<QQ号>"。注：OneBot/NapCat 无法真正接听系统级 QQ 电话，这是用语音消息模拟的实时听说会话（你说话→我转写→我回复→我分句流式念出来）。',
-      parameters: { type: 'object', properties: { action: { type: 'string', description: 'start=发起/接听通话，end=挂断，status=查看状态' }, to: { type: 'string', description: '目标会话 group:<群号> 或 private:<QQ号>；不填则无法发起/挂断（status 可不填）' } }, required: ['action'] },
-      handler: async (args) => {
-        if (!this.config.call.enabled) return '语音通话功能未开启（控制台 worlds.qqbot.call.enabled）。';
-        const action = String(args.action ?? 'status');
-        const address = typeof args.to === 'string' && args.to.trim() ? String(args.to).trim() : '';
-        if (action === 'status') {
-          return this.inCall.size ? `当前通话中的会话：${ [...this.inCall].map((a) => this.convLabel(a)).join('、') }` : '当前没有进行中的语音通话。';
-        }
-        if (!address) return 'action=start/end 需要 to 参数（目标会话 group:<群号> 或 private:<QQ号>）。';
-        if (action === 'end') {
-          if (!this.inCall.has(address)) return `${this.convLabel(address)} 当前不在通话中。`;
-          await this.endCall(address);
-          return `已挂断 ${this.convLabel(address)} 的语音通话。`;
-        }
-        if (action === 'start') {
-          const quiet = this.checkQuiet(address);
-          if (quiet) return quiet;
-          if (this.inCall.has(address)) return `${this.convLabel(address)} 已经在通话中了。`;
-          await this.startCall(address);
-          if (this.config.call.mode === 'system') return this.inCall.has(address)
-            ? `已接听 ${this.convLabel(address)} 的原生 QQ 通话。`
-            : '未接听：需要该白名单联系人正在拨入、音频设备就绪且控制台未暂停。原生通话桥不支持主动拨号。';
-          return `已向 ${this.convLabel(address)} 发起语音通话（若本地语音模型就绪则已自动接听）。`;
-        }
-        return 'action 仅支持 start / end / status。';
-      },
-    };
 
-    const tools: ToolDef[] = [forwardById,stickerToFavorites,stickerTag,send, confirm, viewImage, stickerStats, proactiveStatus, proactiveTrigger, qzonePost, qzoneDelete, qzoneReply, qzoneFeeds, qzoneStatus, poke, reminderAdd, reminderList, reminderCancel, affinityAdjust, affinityGet, affinityList, aliasSet, aliasForget, aliasList, noteSave, noteList, noteGet, noteForget, adminRecall, adminAtAll, adminNotice, adminJoinList, adminJoinApprove, adminJoinReject, adminTitle, adminBan, adminBanAll, adminKick, voicecall, ...makeHistoryTools({
+
+    const tools: ToolDef[] = [forwardById,stickerToFavorites,stickerTag,send, confirm, viewImage, stickerStats, proactiveStatus, proactiveTrigger, qzonePost, qzoneDelete, qzoneReply, qzoneFeeds, qzoneStatus, poke, reminderAdd, reminderList, reminderCancel, affinityAdjust, affinityGet, affinityList, aliasSet, aliasForget, aliasList, noteSave, noteList, noteGet, noteForget, adminRecall, adminAtAll, adminNotice, adminJoinList, adminJoinApprove, adminJoinReject, adminTitle, adminBan, adminBanAll, adminKick, ...makeHistoryTools({
 
       getHost: () => this.host,
       sourceId: SOURCE,
@@ -4693,17 +3714,14 @@ const forwardById: ToolDef = {
       { id: 'reminder', title: '到点提醒', description: '记下的定时提醒到点自动发到对应会话。', group: 'world:qqbot', prefix: 'worlds.qqbot.reminder.', topOnly: false },
       { id: 'affinity', title: '好感度', description: '好感度系统：随互动增减并注入对话上下文。', group: 'world:qqbot', prefix: 'worlds.qqbot.affinity.', topOnly: false },
       { id: 'admin', title: '群管理员', description: '群管理员能力：撤回/@全体/通知/审核进群/头衔/禁言/踢人。', group: 'world:qqbot', prefix: 'worlds.qqbot.admin.', topOnly: false },
-      { id: 'voice', title: '语音收发', description: '对方说话转文字、AI 回复转语音。可整体开关，运行时状态见上方。', group: 'world:qqbot-voice', prefix: '', topOnly: false, status: 'getVoiceState' },
-      { id: 'asr', title: '语音模型', description: 'ASR 引擎与模型下载：sherpa-onnx int8 量化版约 228MB，省内存更快。', group: 'world:qqbot-asr', prefix: '', topOnly: false, status: 'getAsrModelState', extra: 'asr' },
-      { id: 'call', title: '语音通话', description: '触发词进入语音通话会话（模拟接听）。可整体开关。', group: 'world:qqbot-call', prefix: '', topOnly: false, status: 'getCallState' },
-      { id: 'voxcpm', title: 'VoxCPM 侧车', description: 'TTS 侧车子进程（语音合成）。仅当语音引擎选 VoxCPM 时显示，可开关自拉起。', group: 'world:qqbot-voxcpm-sidecar', prefix: '', topOnly: false, status: 'getVoxcpmState' },
+      { id: 'voice', title: '语音发送', description: 'AI 回复转语音；音频输入需单独安装 QQ Audio Input。可整体开关，运行时状态见上方。', group: 'world:qqbot-voice', prefix: '', topOnly: false, status: 'getVoiceState' },
     ];
     const activeModulePanels = modulePanels;
     const toPanelDecl = (m: (typeof modulePanels)[number]): WorldPanelDecl => ({
       id: m.id,
       title: m.title,
       description: m.description,
-      getMethods: ['config', ...(m.id === 'general' ? ['restartConnection', 'getReverseToken'] : []), ...(m.status ? [m.status] : []), ...(m.extra === 'asr' ? ['downloadAsrModel'] : [])],
+      getMethods: ['config', ...(m.id === 'general' ? ['restartConnection', 'getReverseToken'] : []), ...(m.status ? [m.status] : [])],
     });
     // 面板顺序：连接与监听排第一（装完扩展第一件事就是配连接与监听），监听名单排第二，
     // 其余模块与「实时事件」保持原有相对顺序。
@@ -4760,171 +3778,22 @@ const forwardById: ToolDef = {
           ],
         },
       ],
-      config: [QQ_QUIET_GROUP, QQ_CONFIG_GROUP, QQ_VOICE_GROUP, QQ_ASR_GROUP, QQ_CALL_GROUP, QQ_VOXCPM_SIDECAR_GROUP],
+      config: [QQ_QUIET_GROUP, QQ_CONFIG_GROUP, QQ_VOICE_GROUP],
 
     };
-  }
-
-  private asrDownload: { phase: 'idle' | 'working' | 'ready' | 'error'; detail: string; log: string[]; startedAt: number } | null = null;
-
-  private async getAsrModelState(): Promise<unknown> {
-    const asr = this.config.asr || {};
-    const engine = (asr.localEngine || 'funasr').toLowerCase();
-    const defModelName = process.env.QQBOT_ASR_MODEL_NAME || (engine === 'sherpaonnx' ? 'sherpa-onnx-sense-voice' : '');
-    let modelPath = (asr.localModelPath || '').trim();
-    if (!modelPath || !existsSync(modelPath)) {
-      const cands = [process.env.QQBOT_ASR_MODEL_DIR || '', join(this.packageDir, 'models', defModelName)];
-      modelPath = cands.find((c) => c && existsSync(c)) || '';
-    }
-    const modelPresent =
-      (!!modelPath && existsSync(join(modelPath, 'model_q8.onnx'))) ||
-      (!!modelPath && existsSync(join(modelPath, 'model.onnx')));
-    return {
-      engine,
-      mode: asr.mode,
-      modelPath,
-      modelPresent: !!modelPresent,
-      download: this.asrDownload
-        ? { phase: this.asrDownload.phase, detail: this.asrDownload.detail, log: this.asrDownload.log.slice(-30) }
-        : { phase: 'idle', detail: '未下载', log: [] },
-    };
-  }
-
-  private async downloadAsrModel(): Promise<unknown> {
-    if (this.asrDownload?.phase === 'working') return {ok: true, started: false};
-    const asr = this.config.asr || {};
-    const engine = (asr.localEngine || 'funasr').toLowerCase();
-    if (engine !== 'sherpaonnx') {
-      return { ok: false, error: '当前引擎不是 sherpaOnnx，无需下载（仅 sherpaOnnx 需本地模型；funasr 首次运行会自动下载）' };
-    }
-    const target = join(this.packageDir, 'models', 'sherpa-onnx-sense-voice');
-    this.asrDownload = { phase: 'working', detail: '正在从 ModelScope 下载 model_q8.onnx + tokens.txt（约 239MB）…', log: [], startedAt: Date.now() };
-    void this.runAsrDownload(target);
-    return { ok: true, started: true };
-  }
-
-  private resolveAsrPython(): string {
-    const venv = this.config.asr.localVenv?.trim();
-    if (venv) return venvPython(venv);
-    if (process.env.QQBOT_ASR_PYTHON?.trim()) return process.env.QQBOT_ASR_PYTHON.trim();
-    if (process.env.QQBOT_ASR_VENV?.trim()) return venvPython(process.env.QQBOT_ASR_VENV.trim());
-    return findVenvPython([
-      join(EXT_ROOT, 'venv_vox'), join(EXT_ROOT, 'venv'),
-      join(this.packageDir, 'venv_vox'), join(this.packageDir, 'venv'),
-    ]);
-  }
-
-  private async runAsrDownload(target: string): Promise<void> {
-    const python = this.resolveAsrPython();
-    if (!python) {
-      if (this.asrDownload) { this.asrDownload.phase = 'error'; this.asrDownload.detail = '找不到 python（venv 未配置）'; }
-      return;
-    }
-    const script = [
-      'import os, sys',
-      "os.environ['CUDA_VISIBLE_DEVICES'] = '-1'",
-      'from modelscope import snapshot_download',
-      "p = snapshot_download('xiaowangge/sherpa-onnx-sense-voice-small', allow_patterns=['model_q8.onnx','tokens.txt','config.json'], local_dir=sys.argv[1])",
-      "print('DOWNLOADED', p)",
-    ].join('\n');
-    const child = spawn(python, ['-c', script, target], { cwd: this.packageDir, windowsHide: true });
-    child.stdout?.on('data', (d: Buffer) => { if (this.asrDownload) this.asrDownload.log.push(d.toString()); });
-    child.stderr?.on('data', (d: Buffer) => { if (this.asrDownload) this.asrDownload.log.push(d.toString()); });
-    await new Promise<void>((resolve) => {
-      child.on('close', (code: number) => {
-        if (this.asrDownload) {
-          if (code === 0) { this.asrDownload.phase = 'ready'; this.asrDownload.detail = '下载完成：' + target; }
-          else { this.asrDownload.phase = 'error'; this.asrDownload.detail = '下载失败，退出码 ' + code; }
-        }
-        resolve();
-      });
-      child.on('error', (e: Error) => {
-        if (this.asrDownload) { this.asrDownload.phase = 'error'; this.asrDownload.detail = '启动失败：' + e.message; }
-        resolve();
-      });
-    });
   }
 
   private async getVoiceState(): Promise<unknown> {
     const v = this.config.voice || {};
-    const cfg = this.config.voxcpmSidecar || {};
     const ttsReady = !v.enabled ? 'disabled'
       : await voiceReady(this.voiceRuntime(), this.log) ? 'ready' : 'offline';
     return {
       enabled: !!v.enabled,
       provider: v.provider || 'native',
-      asr: !!v.asr,
       tts: !!v.tts,
       semanticJudge: !!v.semanticJudge,
       voxcpmUrl: v.voxcpmUrl || 'http://127.0.0.1:8765',
       ttsReady,
-      sidecarAuto: !!cfg.enabled,
-    };
-  }
-
-  private toWordList(raw: unknown): string[] {
-    if (Array.isArray(raw)) return raw.map((x) => String(x));
-    if (typeof raw === 'string') {
-      const parts = raw.split(',').map((s) => s.trim()).filter((s) => s.length > 0);
-      return parts;
-    }
-    if (raw == null) return [];
-    return [String(raw)];
-  }
-
-  private async getCallState(): Promise<unknown> {
-    const c = this.config.call || {};
-    let bridgeUp = false;
-    let loopbackActive = false;
-    let audioReady = false;
-    let bridgeError = '';
-    try {
-      const r = await fetch(this.callBridgeBase() + '/status', { signal: AbortSignal.timeout(3000) });
-      if (r.ok) {
-        const j = (await r.json()) as Record<string, unknown>;
-        bridgeUp = true;
-        loopbackActive = !!j.loopback_active;
-        audioReady = !!j.ready;
-        bridgeError = typeof j.error === 'string' && j.error ||
-          (j.devices && typeof j.devices === 'object' ? String((j.devices as any).reason || '') : '');
-      }
-    } catch {
-      bridgeUp = false;
-    }
-    return {
-      enabled: !!c.enabled,
-      mode: c.mode,
-      bridgeUrl: this.callBridgeBase(),
-      bridgeUp,
-      loopbackActive,
-      audioReady,
-      bridgeError,
-      inCall: this.inCall ? this.inCall.size : 0,
-      triggerWords: this.toWordList(c.triggerWords),
-      hangupWords: this.toWordList(c.hangupWords),
-    };
-  }
-
-  private async getVoxcpmState(): Promise<unknown> {
-    const cfg = this.config.voxcpmSidecar || {};
-    const { host, port } = this.voxcpmHostPort();
-    let running = false;
-    try {
-      const r = await fetch(`http://${host}:${port}/health`, { signal: AbortSignal.timeout(3000) });
-      running = r.ok;
-    } catch {
-      running = false;
-    }
-    const info = this.resolveSidecar();
-    return {
-      enabled: !!cfg.enabled,
-      running,
-      pid: this.sidecarProc && this.sidecarProc.exitCode === null ? this.sidecarProc.pid : null,
-      venv: info ? info.python : (cfg.venv || ''),
-      script: info ? info.script : (cfg.script || ''),
-      modelDir: info ? info.modelDir : (cfg.modelDir || ''),
-      url: `http://${host}:${port}`,
-      note: '侧车自拉起为启动时生效；开关保存后若需立即生效请重启 run（POST /api/run/restart）。',
     };
   }
 
@@ -4934,9 +3803,6 @@ const forwardById: ToolDef = {
       'world:qqbot-quiet': QQ_QUIET_GROUP,
       'world:qqbot': QQ_CONFIG_GROUP,
       'world:qqbot-voice': QQ_VOICE_GROUP,
-      'world:qqbot-call': QQ_CALL_GROUP,
-      'world:qqbot-asr': QQ_ASR_GROUP,
-      'world:qqbot-voxcpm-sidecar': QQ_VOXCPM_SIDECAR_GROUP,
     };
     return map[id];
   }
@@ -5005,18 +3871,8 @@ const forwardById: ToolDef = {
       }));
       return { selfId: this.identity?.selfId ?? null, mode: this.config.mode, groups: toIds(this.config.groups), privates: toIds(this.config.privates), convs: list };
     }
-    if (panel === 'asr') {
-      if (method === 'getAsrModelState') return this.getAsrModelState();
-      if (method === 'downloadAsrModel') return this.downloadAsrModel();
-    }
     if (panel === 'voice') {
       if (method === 'getVoiceState') return this.getVoiceState();
-    }
-    if (panel === 'call') {
-      if (method === 'getCallState') return this.getCallState();
-    }
-    if (panel === 'voxcpm') {
-      if (method === 'getVoxcpmState') return this.getVoxcpmState();
     }
     if (method === 'config') {
       const groupId = typeof args[0] === 'string' ? args[0] : '';

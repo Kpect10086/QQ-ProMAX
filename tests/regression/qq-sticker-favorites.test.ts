@@ -36,7 +36,7 @@ it('favorite import deduplicates concurrent images, annotates using deployment s
   expect(existsSync(join(dir,match[0].file))).toBe(true);
   expect(buildOutgoing(`[表情包:${match[0].file}]`,dir)).toEqual([{type:'image',data:{file:join(dir,match[0].file),sub_type:1}}]);
   expect(new StickerStore(dir,cfg,nullLogger(),dir).stats(10,'开心').recent[0].file).toBe(match[0].file);
-  const world=new QQWorld({emojiDir:dir,sendIntervalMs:0,voice:{enabled:false},proactive:{},routine:{}});
+  const world=new QQWorld({emojiDir:dir,localResourcesDir:dir,sendIntervalMs:0,voice:{enabled:false},proactive:{},routine:{}});
   world.stickers=store;world.host={isPaused:()=>false};world.log=nullLogger();
   const sent:unknown[]=[];
   world.driver={callApi:async(_action:string,params:unknown)=>{sent.push(params);return {};}};

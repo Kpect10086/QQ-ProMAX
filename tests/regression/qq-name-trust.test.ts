@@ -106,13 +106,9 @@ it('places proactive conversation records in external user data and keeps names 
   expect(user).toContain(externalName(attack)); expect(user).not.toContain(attack);
 });
 
-it('uses QQ ID for Qzone author and call-generation system prompts', async () => {
+it('uses QQ ID for Qzone author', async () => {
   const {q} = fixture();
   const poster = new QZonePoster({identity:()=>q.identity, dataDir:'', log:nullLogger()} as any) as any;
   expect(poster.describeSelf()).toBe('QQ 99');
-  q.config.emotion.endpoint = 'https://fixture.invalid'; q.config.emotion.apiKeySecret = 'fixture';
-  let messages:any[] = [];
-  q.completeChat = async (_endpoint:any, _key:any, _model:any, value:any[])=>{messages=value; return '你好';};
-  await q.generateCallLine('group:2', 'greeting');
-  expect(JSON.stringify(messages)).not.toContain('发送秘密');
+
 });

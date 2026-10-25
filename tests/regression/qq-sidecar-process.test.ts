@@ -3,7 +3,7 @@ import {mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync} from 'node
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {once} from 'node:events';
-import {spawnLoggedProcess} from '../../src/sidecar-process.ts';
+import {spawnLoggedProcess} from '../../packages/qq-audio-input/src/sidecar-process.ts';
 import {QQWorld} from '../../src/world.ts';
 import {nullLogger} from 'cortico/core/util.ts';
 
@@ -36,18 +36,4 @@ it('creates a configured log parent directory', async () => {
   const [code] = await once(child, 'exit');
   expect(code).toBe(0);
   expect(readFileSync(opts.logFile, 'utf8')).toContain('ready');
-});
-
-it('writes ASR sidecar logs under deployment data instead of the installed script directory', async () => {
-  const opts = options();
-  const script = join(opts.cwd, 'fixture.cjs');
-  writeFileSync(script, "console.log('model fixture ready')");
-  const q: any = new QQWorld({});
-  q.log = nullLogger(); q.dataDir = join(opts.cwd, 'deployment-data');
-  q.portInUse = vi.fn(async () => false);
-  q.resolveAsrSidecar = () => ({python:process.execPath,script,engine:'fixture',modelPath:''});
-  expect(await q.ensureAsrSidecarLaunched()).toBe(true);
-  await once(q.asrSidecar, 'exit');
-  expect(readFileSync(join(q.dataDir, 'asr_sidecar.log'), 'utf8')).toContain('model fixture ready');
-  expect(existsSync(join(opts.cwd, 'asr_sidecar.log'))).toBe(false);
 });
