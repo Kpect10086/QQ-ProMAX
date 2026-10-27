@@ -2,17 +2,17 @@
 
 Owner: src/definition.ts, src/world.ts, src/config.ts.
 
-群名、昵称和群名片按外部展示数据处理：消息中转义并限制长度，system 环境与内部通知使用群号和 QQ 号。主动聊天的原始会话记录放在外部资料段，不拼入 system；旧情绪缓存中的名字不会继续进入 system 提示。此隔离降低名称冒充内部指令的风险，聊天正文和模型对外部资料的理解仍需遵守权限与发送限制。
+群名、昵称和群名片按外部展示数据处理：消息中转义并限制长度，system 环境与内部通知使用群号和 QQ 号。主动交流事件只包含会话地址和调度原因，不复制原始聊天或昵称；主模型在已有上下文中决定是否发言。此隔离降低名称冒充内部指令的风险，聊天正文和模型对外部资料的理解仍需遵守权限与发送限制。
 
 本插件基于 [@hth768](https://github.com/hth768) 制作的 [QQ-final（cortico-world-qq-final）](https://github.com/hth768/cortico-world-qq-final) 插件开发。
 
-QQ ProMAX 是 Cortico 的 QQ World 扩展，支持 QQ 群聊、私聊、空间、消息历史、表情包和语音发送，适配 Cortico 0.2.6 / World API 6。当前版本已移除桌宠功能，按当前上游源码的 AGPL-3.0-or-later 发布。
+QQ ProMAX 是 Cortico 的 QQ World 扩展，支持 QQ 群聊、私聊、消息历史、表情包和语音发送，适配 Cortico 0.2.6 / World API 6。当前版本已移除桌宠功能，按当前上游源码的 AGPL-3.0-or-later 发布。
 
 运行时仅依赖 ws，图片下载、时间格式化和工具自描述实现均随包提供；不要求 Coopanion/Cortico 安装目录含 src 源码，也不要求给宿主额外补装 pino。
 
 ## 安装
 
-在 Cortico 扩展页搜索 QQ ProMAX，或手动安装 npm 包 `cortico-world-qq-promax@0.2.0`，重启已有 Cortico 后加载。也可以从本仓库下载或检出源码，在扩展页选择本机目录安装。
+在 Cortico 扩展页搜索 QQ ProMAX，或手动安装 npm 包 `cortico-world-qq-promax@0.3.0`，重启已有 Cortico 后加载。也可以从本仓库下载或检出源码，在扩展页选择本机目录安装。
 
 本扩展与 cortico-world-qq-final 使用相同的 World id（qqbot）。迁移时保留 worlds.qqbot 配置，先停用并卸载旧扩展，再安装本扩展；不可同时加载两份 qqbot。
 
@@ -24,17 +24,28 @@ QQ ProMAX 是 Cortico 的 QQ World 扩展，支持 QQ 群聊、私聊、空间�
 2. 分别填写允许监听的群号与私聊 QQ 号。留空不读取该类会话；群聊/私聊回复开关独立生效。
 3. 重启后发送一条新消息验证。启动前历史最多补读 10 条，旧消息不触发回复。
 
-私聊每次回复最多条数默认 3，0 为不限。按模型回合及收件人计数，文字、图片、语音共享额度，分句超出时合并；无法容纳时先拒绝并反馈精简要求。没有历史记录不等于私聊关闭，qq_recent 会返回当前读取及发送状态。
+私聊每次回复最多条数默认 3，0 为不限。按模型回合及收件人计数，文字、图片、语音共享额度，分句超出时合并；无法容纳时先拒绝并反馈精简要求。没有历史记录不等于私聊关闭，qq_history(mode=recent) 会返回当前读取及发送状态。
 
-启用作息静默后，主动消息、提醒和空间写入停止；仅回复静默白名单里的新消息。直播状态文件、内容审核地址和语言指令文件都是可选配置；本包不附带任何部署专用服务。
+启用作息静默后，主动交流事件和提醒停止；仅回复静默白名单里的新消息。直播状态文件、内容审核地址和语言指令文件都是可选配置；本包不附带任何部署专用服务。
 
-QQ 空间默认关闭，开启后依赖协议端支持对应扩展接口。qq_qzone_status 展示本地记录和限制，qq_qzone_feeds 读取实际动态。没有发布 tid 时结果无法确认，先查询列表再决定是否重试。
+QQ 空间拆为独立包 [QQ 空间](packages/qq-qzone/README.md)，默认关闭，使用自己的 OneBot 连接、允许名单和静默配置；主包不注册空间工具。
 
 ## 可选功能
 
 文字收发不需要 Python、语音模型或虚拟音频驱动。主包仅提供 TTS 语音发送（native/custom/local/voxcpm），不识别、解码或向模型回退上传入站语音，不采集麦克风、系统声音，也不接听原生 QQ 电话。TTS 模型由用户自行启动服务并填写地址；主包不再查找或执行 Python、侧车脚本或下载模型。
 
 QQ 语音消息的文字识别已拆到独立包 [QQ Audio Input](packages/qq-audio-input/README.md)，须单独安装、启用、填写自己的 OneBot 正向连接及允许名单。默认关闭；其隐私标签独立保留。它提供按近期消息编号转写的工具，不会重复触发主包的聊天事件，也不调用其他 World。
+
+### 0.3.0 升级
+
+- QQ 插件内置好感度系统已完全移除，不再提供关系分工具、配置或提示注入，也不再加载旧好感度数据。独立的 Persona 或其他扩展可自行管理关系。
+- 群管统一为 `qq_admin(action=...)`，动作包括 recall、at_all、notice、join_list、join_approve、join_reject、title、ban、ban_all、kick。旧工具名不再注册，权限检查仍在原处理器中。
+- 主动说话与作息变化只投递交流事件，由主模型按当前 Persona、记忆和发送限制决定是否调用 `qq_send`。每日配额统计交流事件数；不再后台生成草稿或直接发送。测试按钮位于主动说话控制台。
+- 旧 `proactive.model/systemPrompt/endpoint/apiKeySecret/topicSimilarity/tokenLimit/withNickname`、`emotion.*` 和 `voice.semanticJudge/judge*` 配置不再执行。情绪由当前 Persona 表达；语音形式用 `qq_send(voice=true)` 选择。
+- 辅助视觉默认关闭，须显式填写 `vision.endpoint/model/apiKeySecret` 后启用；主模型仍可接收图片附件。表情收藏不再默认发起额外视觉模型调用。
+- 私人笔记仅使用本扩展数据目录的 `notebook.jsonl`。旧记忆扩展的 qq 域不会被本包读取或删除；要迁移时先从原记忆扩展导出，再通过 `qq_note_update(action=save)` 保存。不要把原库当作空白后直接覆盖。
+- 使用 QQ 空间的用户另装 `cortico-world-qq-qzone@0.1.0`，迁移说明见独立包 README。主包不会代填连接、名单或复制私聊历史。
+- npm 只包含运行所需的源码、控制台与说明；测试和开发配置保留在 GitHub。源码目录开发先安装开发依赖。
 
 ### 本地资源目录（0.2.0 迁移）
 
@@ -64,6 +75,8 @@ npm ci
 npm test
 npm run typecheck
 npm run build:web
+npm run build:qzone
+npm run test:package
 ```
 
 在 Cortico 扩展页选择本机目录可加载检出的源码。修改前端后重新运行 build:web，修改 TypeScript 后重启已有 Cortico。

@@ -15,9 +15,11 @@ function run(args, options={}) {
   return result.stdout;
 }
 try {
- for (const entry of [{name:'cortico-world-qq-promax',cwd:process.cwd()}, {name:'cortico-world-qq-audio-input',cwd:join(process.cwd(),'packages','qq-audio-input')}]) {
+ for (const entry of [{name:'cortico-world-qq-promax',cwd:process.cwd()}, {name:'cortico-world-qq-audio-input',cwd:join(process.cwd(),'packages','qq-audio-input')}, {name:'cortico-world-qq-qzone',cwd:join(process.cwd(),'packages','qq-qzone')}]) {
   const packed = JSON.parse(run([npm, 'pack', '--ignore-scripts', '--json', '--pack-destination', directory],{cwd:entry.cwd}))[0];
   if (entry.name==='cortico-world-qq-promax') assert.ok(packed.files.every(f=>!f.path.startsWith('src/asr/') && f.path!=='asr_sidecar.py' && !f.path.startsWith('packages/')));
+  if (entry.name==='cortico-world-qq-promax') assert.ok(packed.files.every(f=>f.path!=='src/affinity.ts'&&f.path!=='src/emotion.ts'&&f.path!=='src/qzone.ts'));
+  assert.ok(packed.files.every(f=>!f.path.startsWith('tests/')&&!['vitest.config.ts','tsconfig.json'].includes(f.path)));
   const install = join(directory, entry.name);
   run([npm, 'install', '--prefix', install, '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund', join(directory, packed.filename)]);
   for (const name of ['cortico', 'pino', 'tsx']) {
@@ -25,7 +27,7 @@ try {
   }
   const plugin = join(install, 'node_modules', entry.name);
   if (entry.name==='cortico-world-qq-promax') process.stdout.write(run([fileURLToPath(new URL('./host-free.mjs', import.meta.url)), plugin]));
-  else process.stdout.write(run(['--import',new URL('./no-host-source.mjs',import.meta.url).href,fileURLToPath(new URL('./audio-input-smoke.mjs',import.meta.url)),plugin]));
+  else process.stdout.write(run(['--import',new URL('./no-host-source.mjs',import.meta.url).href,fileURLToPath(new URL(entry.name==='cortico-world-qq-qzone'?'./qzone-smoke.mjs':'./audio-input-smoke.mjs',import.meta.url)),plugin]));
   console.log(JSON.stringify({packagedInstall:true, hostSourcePresent:false, pinoInstalled:false, version:packed.version}));
  }
 } finally {rmSync(directory, {recursive:true, force:true});}

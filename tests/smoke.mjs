@@ -24,8 +24,7 @@ wss.on('connection',ws=>{clients.push(ws);ws.on('message',raw=>{
 const cfg=def.defaults();Object.assign(cfg,{enabled:true,mode:'forward',wsUrl:`ws://127.0.0.1:${wss.address().port}`,
   groups:'90000002',privates:'90000003',sendIntervalMs:0,maxPrivateMessagesPerReply:2,privateAggregationWindow:0});
 cfg.sticker.enabled=false;cfg.voice.enabled=false;
-cfg.proactive.enabled=false;cfg.proactive.quietFrom=cfg.proactive.quietTo=0;cfg.emotion.enabled=false;cfg.affinity.enabled=false;cfg.routine.enabled=false;
-cfg.qzone.enabled=true;cfg.qzone.tickSec=3600;cfg.qzone.chancePerTick=0;cfg.qzone.imageMode='none';
+cfg.proactive.enabled=false;cfg.proactive.quietFrom=cfg.proactive.quietTo=0;cfg.routine.enabled=false;
 mkdirSync('fixture-data',{recursive:true});
 const q=def.create({cfg,packageDir:pkgDir,dataDir:join(process.cwd(),'fixture-data'),timezone:'UTC',persist:()=>{}});
 const store={range:filter=>saved.filter(e=>(!filter?.source||e.source===filter.source)&&(!filter?.senderKey||e.senderKey===filter.senderKey)).slice(-(filter?.limit??saved.length)),grep:()=>[]};
@@ -45,10 +44,7 @@ try {
   assert.ok(sent.length<=2);assert.equal(sent.flatMap(p=>p.message).filter(s=>s.type==='text').map(s=>s.data.text).join(''),'One!Two!Three!Four!');
   const before=saved.length;clients[0].send(JSON.stringify({...input,user_id:90000004,message_id:302}));await new Promise(r=>setTimeout(r,100));assert.equal(saved.length,before,'Unlisted peers are not read');
   cfg.replyPrivates=false;assert.match(String(await send.handler({to:'private:90000003',text:'Must not send'},{})),/私聊回复已关闭/);cfg.replyPrivates=true;
-  const feeds=await tools.find(t=>t.name==='qq_qzone_read').handler({view:"feeds",num:1},{});assert.ok(String(feeds).includes('fixture-existing'));
-  const posted=await tools.find(t=>t.name==='qq_qzone_post').handler({content:'Fixture post only on local mock'},{});assert.ok(String(posted).includes('fixture-new'));
-  paused=true;assert.ok(String(await tools.find(t=>t.name==='qq_qzone_post').handler({content:'Blocked'},{})).includes('暂停'));paused=false;
-  const ui=q.webUi('zh');assert.equal(ui.label,'QQ ProMAX');assert.ok(ui.panels.length>=16);assert.ok(ui.config.every(g=>g.owner==='world:qqbot'));
+  const ui=q.webUi('zh');assert.equal(ui.label,'QQ ProMAX');assert.ok(ui.panels.length>=13);assert.ok(ui.config.every(g=>g.owner==='world:qqbot'));
   assert.ok(!('desktopPet' in def.defaults()));
   assert.ok(!('desktopPet' in q.config));
   assert.ok(tools.every(t=>t.name.startsWith('qq_')));
@@ -62,5 +58,5 @@ try {
   assert.ok(!/desktop-pet|pet-voice|pet-dressframe/.test(readFileSync(join(pkgDir,meta.cortico.webUiClient),'utf8')));
   assert.deepEqual(JSON.parse(readFileSync(join(pkgDir,'describe.json'),'utf8')).tools,JSON.parse(JSON.stringify(def.describe.tools)));
   assert.ok(def.describe.tools.length>=tools.length);assert.ok(requests.includes('send_msg'));
-  console.log(JSON.stringify({passed:true,package:meta.name,version:meta.version,hostSourceRequired:false,transport:'real localhost WebSocket / OneBot v11',tools:tools.length,declaredTools:def.describe.tools.length,panels:ui.panels.length,privateInput:true,replyLimit:true,whitelist:true,replySwitch:true,qzoneRead:true,qzoneReceipt:true,pauseGate:true}));
+  console.log(JSON.stringify({passed:true,package:meta.name,version:meta.version,hostSourceRequired:false,transport:'real localhost WebSocket / OneBot v11',tools:tools.length,declaredTools:def.describe.tools.length,panels:ui.panels.length,privateInput:true,replyLimit:true,whitelist:true,replySwitch:true,pauseGate:true}));
 } finally {await q.stop();for(const ws of clients)ws.terminate();await new Promise(r=>wss.close(r));}

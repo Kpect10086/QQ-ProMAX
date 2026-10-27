@@ -15,8 +15,8 @@ function fixture(){
   const send=(args:any)=>q.tools().find((t:any)=>t.name==='qq_send').handler({to:'private:1',text:'我在这里。',...args},{});
   return{q,sent,events,requests,send,pause:()=>{paused=true;}};
 }
-it('sends synthesized QQ audio when the main agent explicitly selects voice despite a negative side judge',async()=>{
-  const {q,sent,events,requests,send}=fixture();q.voiceWish.set('private:1',false);
+it('sends synthesized QQ audio when the main agent explicitly selects voice without a side judge',async()=>{
+  const {q,sent,events,requests,send}=fixture();
   expect(await send({voice:true})).toContain('发送语音 1 段');
   expect(requests[0].url).toBe('http://speech.invalid/v1/audio/speech');expect(requests[0].body.input).toBe('我在这里。');
   expect(sent[0].message).toEqual([{type:'record',data:{file:expect.stringMatching(/^base64:\/\//)}}]);
@@ -24,8 +24,8 @@ it('sends synthesized QQ audio when the main agent explicitly selects voice desp
   expect(q.recentSends[0].text).toBe('我在这里。');
   q.onTurnEnded();expect(await send({voice:true,text:'第二条'})).toContain('上限');expect(sent).toHaveLength(1);
 });
-it('explicit text selection overrides a prior voice preference without calling TTS',async()=>{
-  const {q,sent,requests,send}=fixture();q.voiceWish.set('private:1',true);
+it('explicit text selection avoids synthesis without calling TTS',async()=>{
+  const {q,sent,requests,send}=fixture();
   expect(await send({voice:false})).toContain('已发送');expect(requests).toHaveLength(0);expect(sent[0].message[0].type).toBe('text');
 });
 it.each(['paused','closed','disabled'])('an explicit voice request respects %s',async mode=>{

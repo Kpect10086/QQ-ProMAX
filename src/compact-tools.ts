@@ -45,14 +45,10 @@ export function compactQQTools(original: ToolDef[]): ToolDef[] {
     { set: 'qq_alias_set', forget: 'qq_alias_forget' });
   combine('qq_reminder_update', '管理定时提醒：action=add 填 text、when 新增，action=cancel 填 id 取消。when 支持带时区 ISO、HH:MM、明天 9:00、in 30m、30分钟后等；只能设未来时间。address 默认当前会话，scope 是备注；到点自动发送。用 qq_reminder_list 查询编号。', 'action',
     { add: 'qq_reminder_add', cancel: 'qq_reminder_cancel' });
-  combine('qq_affinity_read', '查询关系分：view=person 读 who 的好感度（私聊可省略 who，群聊须指定）；view=ranking 按关系分从高到低列出所有人。', 'view',
-    { person: 'qq_affinity_get', ranking: 'qq_affinity_list' });
   combine('qq_history', '查询当前允许读取的 QQ 历史：mode=recent 用 group 或 peer 指定会话，minutes 为回溯分钟；mode=search 用 keyword 检索所有可读会话。关闭或名单外的会话不可读取，结果按原发送时间显示。最近消息同时报告当前发送限制；无历史不表示会话关闭。', 'mode',
     { recent: 'qq_recent', search: 'qq_search' });
-  combine('qq_qzone_read', '查询 QQ 空间：view=status 返回本地发布记录、配额、限制和回评状态；view=feeds 用 num 读取实际动态，依赖协议端支持。本地记录不能代表实时空间状态。', 'view',
-    { status: 'qq_qzone_status', feeds: 'qq_qzone_feeds' });
-  combine('qq_admin_join_decide', '审核加群申请：flag 来自 qq_admin_join_list；decision=approve 通过，decision=reject 拒绝并可填 reason 通知申请人。保留群管理权限和自动审核开关检查。', 'decision',
-    { approve: 'qq_admin_join_approve', reject: 'qq_admin_join_reject' });
+  combine('qq_admin', '群管理：action=recall 撤回(messageId)、at_all 全体提醒(text)、notice 公告(text)、join_list 待审列表、join_approve 通过(flag)、join_reject 拒绝(flag,reason)、title 头衔(user,title)、ban 禁言(user,duration)、ban_all 全员禁言(enable)、kick 踢人(who,rejectRejoin)。group 默认当前群。须开启群管并有协议权限；仅白名单/群管/群主可指挥，AI 自主操作受 allowSelf 限制，自主踢人另需 allowSelfKick；群主与管理员保护、自动审核开关始终生效。', 'action',
+    {recall:'qq_admin_recall',at_all:'qq_admin_at_all',notice:'qq_admin_notice',join_list:'qq_admin_join_list',join_approve:'qq_admin_join_approve',join_reject:'qq_admin_join_reject',title:'qq_admin_title',ban:'qq_admin_ban',ban_all:'qq_admin_ban_all',kick:'qq_admin_kick'});
 
   const send = byName.get('qq_send');
   const audio = byName.get('qq_send_audio');

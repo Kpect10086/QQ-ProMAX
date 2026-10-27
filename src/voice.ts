@@ -12,10 +12,6 @@ export interface RuntimeVoiceCfg {
   enabled: boolean;
   provider: string;
   tts: boolean;
-  semanticJudge: boolean;
-  judgeEndpoint: string;
-  judgeApiKey: string;
-  judgeModel: string;
   /** 自定义(custom)供应商的 OpenAI 兼容音频端点基址，如 https://open.bigmodel.cn/api/paas/v4 或 https://api.openai.com/v1。 */
   voiceBaseUrl: string;
   /** custom 供应商的 API Key（已解析）。 */
@@ -343,61 +339,4 @@ export function voiceReady(cfg: RuntimeVoiceCfg, log: VoiceLog): Promise<boolean
   const p = getVoiceProvider(cfg.provider, log);
   if (p.checkReady) return p.checkReady(cfg, log);
   return Promise.resolve(checkVoiceDeps(cfg, log));
-}
-
-/* ------------------------------------------------------------------ *
- * 语义判定：本次回复是否应当用语音
- * ------------------------------------------------------------------ */
-export async function judgeVoiceWish(
-  userText: string,
-  cfg: RuntimeVoiceCfg,
-  log: VoiceLog,
-  reportUsage?: (usage: { promptTokens: number; completionTokens: number; cacheHitTokens: number }, model: string) => void,
-): Promise<boolean> {
-  if (!cfg.judgeApiKey) {
-    log.info('[voice] 语义判定未配置 judgeApiKey，默认不发语音');
-    return false;
-  }
-  try {
-    const resp = await fetch(`${cfg.judgeEndpoint}/chat/completions`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${cfg.judgeApiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: cfg.judgeModel,
-        temperature: 0,
-        messages: [
-          {
-            role: 'system',
-            content:
-              '你是语音意图判定器。判断：用户这条消息是否希望收到"语音"形式的回复（即机器人用语音念出来）。' +
-              '只有当用户明显想要听语音（如"用语音"/"念给我听"/"说给我听"/"语音回复"）或上下文强烈暗示要语音时才返回 yes。' +
-              '只回复一个词：yes 或 no。',
-          },
-          { role: 'user', content: userText.slice(0, 500) },
-        ],
-      }),
-    });
-    if (!resp.ok) throw new Error(`judge HTTP ${resp.status}`);
-    const j = (await resp.json()) as {
-      choices?: { message?: { content?: string } }[];
-      usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
-    };
-    const ans = j.choices?.[0]?.message?.content?.trim().toLowerCase() ?? '';
-    const ok = ans.startsWith('yes');
-    // 语义判定每次消息调一次模型，须上报用量（认证评审 #104 要求）。
-    if (ok && reportUsage) {
-      reportUsage(
-        {
-          promptTokens: j.usage?.prompt_tokens ?? 0,
-          completionTokens: j.usage?.completion_tokens ?? 0,
-          cacheHitTokens: 0,
-        },
-        cfg.judgeModel,
-      );
-    }
-    return ok;
-  } catch (e) {
-    log.warn('[voice] 语义判定失败，默认不发语音', String(e));
-    return false;
-  }
 }

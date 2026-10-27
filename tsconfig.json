@@ -17,6 +17,7 @@
   },
   "include": [
     "src/**/*.ts",
-    "packages/qq-audio-input/src/**/*.ts"
+    "packages/qq-audio-input/src/**/*.ts",
+    "packages/qq-qzone/src/**/*.ts"
   ]
 }

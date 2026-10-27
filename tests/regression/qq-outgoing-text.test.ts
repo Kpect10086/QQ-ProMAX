@@ -26,7 +26,7 @@ it('the real send boundary transmits plain text and blocks routing or action env
   await world.sendTo('private:1',JSON.stringify({qq_send:{to:'private:2',text:'串聊'}}));
   expect(sent).toHaveLength(1);
 });
-it('proactive chat feeds back the actual plain sentence rather than an imitated tool call',async()=>{
+it('proactive opportunities reach the main model without generating a draft or sending a message',async()=>{
   const world=new QQWorld({proactive:{enabled:true},contentReviewUrl:'',sendIntervalMs:0,antiLoop:{enabled:false}}) as any;
   const events:any[]=[];const sent:any[]=[];
   world.host={isPaused:()=>false,pushEvent:async(e:any)=>events.push(e)};world.log=nullLogger();
@@ -39,7 +39,8 @@ it('proactive chat feeds back the actual plain sentence rather than an imitated 
   world.initProactive();
   try {
     await world.proactive.trigger('private:1');
-    expect(sent).toHaveLength(1);expect(events).toHaveLength(1);
-    expect(events[0].text).toContain('今天休息得怎么样？');expect(events[0].text).not.toContain('qq_send');
+    expect(sent).toHaveLength(0);expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({type:'qq.proactive',origin:'internal',senderKey:'private:1'});
+    expect(events[0].text).not.toContain('今天休息得怎么样？');
   }finally{world.proactive.stop();}
 });

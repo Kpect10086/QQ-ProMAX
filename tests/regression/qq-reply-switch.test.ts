@@ -39,18 +39,17 @@ it('audio attachment and poke tools cannot bypass disabled channels',async()=>{
   }
   expect(sent).toHaveLength(0);
 });
-it('proactive generation excludes muted types and a switch during generation records no successful send',async()=>{
-  const {q,sent,events}=world({proactive:{enabled:true,mode:'all'}});
+it('proactive events exclude muted targets and never send directly',async()=>{
+  const {q,sent,events}=world({proactive:{enabled:true,mode:'both'}});
   for(const [address,kind] of [['private:1','private'],['group:2','group']])q.convs.set(address,{address,kind,active:true,label:'fixture'});
   q.config.replyGroups=false;expect(q.proactiveTargets().map((t:any)=>t.address)).toEqual(['private:1']);
-  q.proactiveSystemPrompt=()=> '只输出正文';
-  q.chatCompletion=async()=>{q.config.replyPrivates=false;return '未发送的主动台词';};
   q.initProactive();
   try {
-    await q.proactive.trigger('private:1');expect(sent).toHaveLength(0);expect(events).toHaveLength(0);
-    expect(q.proactive.status().dailyCount).toBe(0);
-    const trigger=q.tools().find((t:any)=>t.name==='qq_proactive_trigger');
-    expect(await trigger.handler({address:'group:2'},{})).toContain('群聊回复已关闭');
+    await q.proactive.trigger('private:1');expect(sent).toHaveLength(0);expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({type:'qq.proactive',origin:'internal',senderKey:'private:1'});
+    q.config.replyPrivates=false;
+    await q.proactive.trigger('private:1');expect(events).toHaveLength(1);
+    expect(q.tools().some((t:any)=>t.name==='qq_proactive_trigger')).toBe(false);
   }finally{q.proactive.stop();}
 });
 it('a built-in console form exposes both editable switches without rebuilding the web client',async()=>{

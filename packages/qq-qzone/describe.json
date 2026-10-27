@@ -1,0 +1,129 @@
+{
+  "tools": [
+    {
+      "name": "qq_qzone_post",
+      "description": "发布 QQ 空间动态。content 必填，由当前主模型根据可核实的记忆撰写；不公开私聊隐私，别人的经历不写成自己的。images 仅接受真实网络图片、图片附件句柄或允许目录的表情文件名。返回成功和 tid 才表示发布成功，结果不明时先读列表避免重复。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "images": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 9
+          },
+          "ats": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "permission": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "additionalProperties": false
+      },
+      "tags": [
+        "speak"
+      ]
+    },
+    {
+      "name": "qq_qzone_delete",
+      "description": "删除已知 tid 的空间动态。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "tid": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tid"
+        ],
+        "additionalProperties": false
+      },
+      "tags": [
+        "speak"
+      ]
+    },
+    {
+      "name": "qq_qzone_reply",
+      "description": "回复最近 24 小时内允许名单中实际收到的评论。tid 和 comment_id 来自空间评论事件，content 必填。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "tid": {
+            "type": "string"
+          },
+          "comment_id": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tid",
+          "comment_id",
+          "content"
+        ],
+        "additionalProperties": false
+      },
+      "tags": [
+        "speak"
+      ]
+    },
+    {
+      "name": "qq_qzone_read",
+      "description": "查询空间：view=status 返回本地记录和限制，view=feeds 请求协议端实际动态。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "view": {
+            "type": "string",
+            "enum": [
+              "status",
+              "feeds"
+            ]
+          },
+          "num": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20
+          }
+        },
+        "required": [
+          "view"
+        ],
+        "additionalProperties": false
+      },
+      "tags": [
+        "read"
+      ]
+    }
+  ],
+  "events": [
+    {
+      "type": "qq-qzone.proactive",
+      "description": {
+        "zh": "空间发布机会，由主模型决定是否发布。",
+        "en": "An opportunity for the main model to publish a post."
+      }
+    },
+    {
+      "type": "qq-qzone.interact",
+      "description": {
+        "zh": "允许名单中的外部空间评论或互动。",
+        "en": "An external QZone interaction from an allowed user."
+      }
+    }
+  ]
+}

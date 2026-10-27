@@ -1,0 +1,59 @@
+{
+  "name": "cortico-world-qq-qzone",
+  "version": "0.1.0",
+  "description": "独立的 QQ 空间 World：主模型撰写动态与评论，独立 OneBot 连接和允许名单。",
+  "type": "module",
+  "main": "./dist/index.mjs",
+  "license": "AGPL-3.0-or-later",
+  "engines": {
+    "node": ">=22.16.0"
+  },
+  "os": [
+    "win32",
+    "linux"
+  ],
+  "files": [
+    "dist/index.mjs",
+    "describe.json",
+    "README.md",
+    "LICENSE",
+    "LICENSE-MIT",
+    "THIRD_PARTY_NOTICES.md",
+    "CHANGELOG.md"
+  ],
+  "keywords": [
+    "cortico-world",
+    "qq",
+    "qzone",
+    "onebot"
+  ],
+  "cortico": {
+    "kind": "world",
+    "api": 6,
+    "displayName": "QQ 空间",
+    "describe": "describe.json",
+    "tags": [
+      "im",
+      "qq",
+      "external-setup",
+      "unofficial-api",
+      "experimental"
+    ]
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Kpect10086/QQ-ProMAX.git",
+    "directory": "packages/qq-qzone"
+  },
+  "homepage": "https://github.com/Kpect10086/QQ-ProMAX#readme",
+  "bugs": {
+    "url": "https://github.com/Kpect10086/QQ-ProMAX/issues"
+  }
+}

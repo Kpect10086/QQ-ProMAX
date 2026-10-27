@@ -5,14 +5,12 @@ import { qqDefaults, qqTimezoneOptions, type QQConfigSection } from './config.ts
 
 /** 每个工具一句给人看的话;市场与扩展页按界面语言取。 */
 const TOOL_SUMMARIES: Record<string, DescribeText> = {
+  qq_admin: {zh:'执行一项受权限保护的群管理操作。',en:'Run one authorized group administration action.'},
   qq_note_read: { zh: "查询私人笔记列表或条目。", en: "Read notebook entries or one entry." },
   qq_note_update: { zh: "保存或删除私人笔记。", en: "Save or forget a notebook entry." },
   qq_alias_update: { zh: "设置或删除外号对应。", en: "Set or forget a nickname mapping." },
   qq_reminder_update: { zh: "新增或取消定时提醒。", en: "Add or cancel a reminder." },
-  qq_affinity_read: { zh: "查询某人关系分或排行。", en: "Read one affinity score or the ranking." },
   qq_history: { zh: "查看最近消息或检索可读历史。", en: "Read recent messages or search permitted history." },
-  qq_qzone_read: { zh: "查询空间本地状态或实际动态。", en: "Read local QZone status or actual feeds." },
-  qq_admin_join_decide: { zh: "通过或拒绝一条待审加群申请。", en: "Approve or reject a pending group request." },
   qq_send: {
     zh: '回复 QQ 消息的唯一渠道:往群或私聊发一条消息,可引用回复、@人。',
     en: 'The only way to answer a QQ message: send one to a group or private chat, with quoting and mentions.',
@@ -29,22 +27,6 @@ const TOOL_SUMMARIES: Record<string, DescribeText> = {
     zh: '查看主动说话调度器的状态、今日配额与近期主动发言。',
     en: 'Show the proactive-speaking scheduler state, daily quota and recent unsolicited messages.',
   },
-  qq_proactive_trigger: {
-    zh: '手动触发一次主动说话,用于测试。',
-    en: 'Fire one proactive message manually, mainly for testing.',
-  },
-  qq_qzone_post: {
-    zh: '在 QQ 空间发一条动态(说说)。',
-    en: 'Publish a post to the QQ Zone timeline.',
-  },
-  qq_qzone_delete: {
-    zh: '删除一条 QQ 空间动态。',
-    en: 'Delete one QQ Zone post.',
-  },
-  qq_qzone_reply: {
-    zh: '回复某条动态下的一条评论。',
-    en: 'Reply to a comment under a QQ Zone post.',
-  },
   qq_poke: {
     zh: '戳一戳某个人(群内或私聊)。',
     en: 'Poke someone, in a group or privately.',
@@ -53,49 +35,14 @@ const TOOL_SUMMARIES: Record<string, DescribeText> = {
     zh: '列出所有未触发的提醒/记事。',
     en: 'List every reminder that has not fired yet.',
   },
-  qq_affinity_adjust: {
-    zh: '调整你对某个用户的好感度(关系分)。',
-    en: 'Adjust your affinity score toward one user.',
-  },
   qq_alias_list: {
     zh: '列出所有记住的外号与 QQ 号对应关系。',
     en: 'List every stored nickname-to-QQ mapping.',
   },
-  qq_admin_recall: {
-    zh: '【群管理员】撤回一条群消息。',
-    en: 'Recall one group message (admin).',
-  },
-  qq_admin_at_all: {
-    zh: '【群管理员】在群里 @全体成员。',
-    en: 'Mention everyone in the group (admin).',
-  },
-  qq_admin_notice: {
-    zh: '【群管理员】发布群公告。',
-    en: 'Publish a group announcement (admin).',
-  },
-  qq_admin_join_list: {
-    zh: '【群管理员】列出待审核的加群请求。',
-    en: 'List pending join requests awaiting review (admin).',
-  },
-  qq_admin_title: {
-    zh: '【群管理员】给成员设置群专属头衔。',
-    en: 'Set a member special title (admin).',
-  },
-  qq_admin_ban: {
-    zh: '【群管理员·需授权】禁言或解禁某成员。',
-    en: 'Mute or unmute a member (admin, needs authorization).',
-  },
-  qq_admin_ban_all: {
-    zh: '【群管理员】开启或关闭全员禁言。',
-    en: 'Turn group-wide mute on or off (admin).',
-  },
-  qq_admin_kick: {
-    zh: '【群管理员·需授权】把成员踢出群聊。',
-    en: 'Kick a member out of the group (admin, needs authorization).',
-  },
 };
 
 const EVENTS: EventDescribe[] = [
+  {type:'qq.proactive',description:{zh:'主动交流或作息变化的机会，由主模型判断是否发言。',en:'An opportunity for the main model to decide whether to speak.'}},
   {
     type:'qq.sent',
     description:{zh:'协议确认成功发送的本账号消息，仅作衔接和记忆来源，不是新入站请求。',en:'A protocol-confirmed outgoing message from this account, for continuity and memory, not a new incoming request.'},
@@ -131,13 +78,6 @@ const EVENTS: EventDescribe[] = [
     description: {
       zh: '系统提示:连接状态、或用运行时信息替换占位符后的说明文字。',
       en: 'A system notice: connection state, or text whose placeholders were filled at runtime.',
-    },
-  },
-  {
-    type: 'qq.affinity',
-    description: {
-      zh: '某个用户的好感度发生了变化。',
-      en: 'The affinity score of a user changed.',
     },
   },
   {

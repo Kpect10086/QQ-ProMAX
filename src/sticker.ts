@@ -270,7 +270,7 @@ async favoriteSync(max = 50): Promise<{ checked: number; added: number; failed: 
   /** 用 VLM 结构化标注情感/用处；无 key 或失败时返回「未知」降级。 */
   private async annotate(bytes: Uint8Array): Promise<{ emotion: string; usage: string; tag: string }> {
     const apiKey = this.secret(this.vision.apiKeySecret);
-    if (!apiKey) {
+    if (!apiKey || !this.vision.endpoint || !this.vision.model) {
       this.log.warn('缺视觉 API Key，表情包情感标注降级为未知', { secret: this.vision.apiKeySecret });
       return { emotion: '未知', usage: '未知', tag: '' };
     }

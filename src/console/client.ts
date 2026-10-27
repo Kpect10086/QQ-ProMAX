@@ -32,13 +32,10 @@ const MODULES: ModuleSpec[] = [
   { id: 'vision', title: '视觉', desc: '辅助视觉（VLM）：接收图片时用视觉模型理解。', group: 'world:qqbot', prefix: 'worlds.qqbot.vision.', topOnly: false },
   { id: 'sticker', title: '表情包', desc: '自动收藏表情包：下载消息里的图片并标注情感/用处。', group: 'world:qqbot', prefix: 'worlds.qqbot.sticker.', topOnly: false },
   { id: 'proactive', title: '主动说话', desc: '后台按状态机向监听会话主动冒泡闲聊。', group: 'world:qqbot', prefix: 'worlds.qqbot.proactive.', topOnly: false },
-  { id: 'qzone', title: 'QQ空间', desc: 'QQ 空间动态发布、自动冒泡与评论回复。', group: 'world:qqbot', prefix: 'worlds.qqbot.qzone.', topOnly: false },
   { id: 'group-speak', title: '群聊限速', desc: '限制每个群单位窗口内 bot 发出的消息总量。', group: 'world:qqbot', prefix: 'worlds.qqbot.groupSpeak.', topOnly: false },
   { id: 'anti-loop', title: '防刷/话题结束', desc: '统计连续发言与静默时长，超限自动收尾。', group: 'world:qqbot', prefix: 'worlds.qqbot.antiLoop.', topOnly: false },
-  { id: 'emotion', title: '情绪系统', desc: '每轮对话感知情绪、注入全局上下文。', group: 'world:qqbot', prefix: 'worlds.qqbot.emotion.', topOnly: false },
   { id: 'routine', title: '作息功能', desc: '睡眠/午休/活跃作息，到点播报。', group: 'world:qqbot', prefix: 'worlds.qqbot.routine.', topOnly: false },
   { id: 'reminder', title: '到点提醒', desc: '定时提醒到点自动发到对应会话。', group: 'world:qqbot', prefix: 'worlds.qqbot.reminder.', topOnly: false },
-  { id: 'affinity', title: '好感度', desc: '好感度系统：随互动增减并注入对话上下文。', group: 'world:qqbot', prefix: 'worlds.qqbot.affinity.', topOnly: false },
   { id: 'admin', title: '群管理员', desc: '撤回/@全体/通知/审核进群/头衔/禁言/踢人。', group: 'world:qqbot', prefix: 'worlds.qqbot.admin.', topOnly: false },
   { id: 'voice', title: '语音发送', desc: 'AI 回复转语音；音频输入需单独安装 QQ Audio Input。可整体开关。', group: 'world:qqbot-voice', prefix: '', topOnly: false, status: 'getVoiceState' },
 ];
@@ -199,6 +196,11 @@ function makePanel(m: ModuleSpec): WebUiPanel {
       }
 
       // 连接与监听：顶部放「使用教程」链接 + 「重启连接」按钮。
+      if (m.id === 'proactive') {
+        sheet.body.appendChild(ui.button('测试交流事件', {onClick: () => {
+          void ctx.invoke('triggerProactive', []).then(result => toast(String(result)), error => toast(String(error)));
+        }}));
+      }
       // 连接类配置改了之后点一下重启即可生效，不必整进程重启。
       if (m.id === 'general') {
         const bar = ui.rowbar();

@@ -1,6 +1,5 @@
 import type { ConfigGroup } from 'cortico/core/types.ts';
 import type { WorldSection } from 'cortico/world.ts';
-import type { QZoneConfig } from './qzone.ts';
 import type { RoutineConfig } from './proactive.ts';
 import {QQ_QUIET_DEFAULTS, type QuietReplyConfig} from './quiet-hours.ts';
 import { voiceProviderIds } from './voice.ts';
@@ -75,10 +74,6 @@ export interface QQWorldConfig {
   proactive: {
     enabled: boolean;
     mode: 'private' | 'group' | 'both';
-    systemPrompt: string;
-    endpoint: string;
-    apiKeySecret: string;
-    model: string;
     tickSec: number;
     warmupMin: number;
     stableChancePerTick: number;
@@ -89,18 +84,10 @@ export interface QQWorldConfig {
     silentHours: number;
     dailyQuota: number;
     dedupWindow: number;
-    /** 主动消息与近期已发内容的相似度上限（0~1，字符二元组 Jaccard），超过则跳过，防同一话题反复换汤不换药。 */
-    topicSimilarity: number;
-    /** 主动消息生成时模型输出 token 上限（越大单次说得越长），页面可填，默认 2000。 */
-    tokenLimit: number;
-    /** 主动说话是否带对象昵称/称呼；关闭后不称呼对方具体名字，直接用「你」。默认 true。 */
-    withNickname: boolean;
     /** 静默时段只允许私聊回复；起止小时相同表示关闭。 */
     quietFrom: number;
     quietTo: number;
   };
-  /** QQ 空间（动态/说说）：按对话与记忆发表自己的看法/吐槽/简介，可附图与@，支持删除与评论回复。 */
-  qzone: QZoneConfig;
   /** 群聊发言频率限制：限制每个群在单位时间窗口内被 bot 主动+回复发出的消息总量，防止刷屏。 */
   groupSpeak: {
     /** 是否启用群聊发言频率限制。 */
@@ -119,21 +106,6 @@ export interface QQWorldConfig {
     /** 对方静默超过该秒数且 bot 已发过言，则自动收尾（0=关闭该规则）。 */
     idleToEndSec: number;
   };
-  /** 情绪系统：移植自 fat-fish qq_bot 的 emotion 模块，全局维护一份心情，注入上下文并支持 /心情 查询。 */
-  emotion: {
-    /** 是否启用情绪感知与注入。 */
-    enabled: boolean;
-    /** 情绪感知所用 chat 端点（OpenAI 兼容）。 */
-    endpoint: string;
-    /** 端点密钥的环境变量名。 */
-    apiKeySecret: string;
-    /** 感知模型。 */
-    model: string;
-    /** 心情自然衰减半衰期（小时），越小忘得越快。对齐 fat-fish EMOTION_DECAY_HOURS。 */
-    decayHours: number;
-    /** 主导情绪标签冷却（分钟）：冷却期内不切换到新标签，避免来回横跳。对齐 EMOTION_LABEL_MINUTES。 */
-    labelMinutes: number;
-  };
   /** 时区，用于时间戳与 env 提示。 */
   timezone: string;
   /** 作息功能：按真实时间切换「睡眠/午休/活跃」状态，睡眠段暂停主动冒泡并到点播报。 */
@@ -141,15 +113,6 @@ export interface QQWorldConfig {
   /** 闹钟 / 记事本：记录需要定时做的事或约定，到点自动提醒。 */
   reminder: {
     /** 是否启用“到点自动发提醒”。记录 / 查询 / 取消不受此开关影响（始终可用）。 */
-    enabled: boolean;
-  };
-  /** 好感度（关系分）系统：每位用户独立、可正可负、随互动上下浮动，注入上下文影响聊天态度。 */
-  affinity: {
-    /**
-     * 是否启用好感度系统。
-     * - 记录 / 查询 / 调整工具（qq_affinity_*）始终可用；
-     * - 此开关决定是否在「与该用户对话时把当前好感度自动注入上下文」，影响语气与分寸。
-     */
     enabled: boolean;
   };
   /** 自称（第一人称昵称）：用于主动说话调度器与作息状态文本。
@@ -163,16 +126,8 @@ export interface QQWorldConfig {
     enabled: boolean;
     /** 实现方式（语音供应商 id）：当前内置 native=OneBot 原生 tts(零依赖)；custom=远程 OpenAI 兼容 TTS（填语音模型网址+API Key）；local=本地/自建 TTS（免 Key）；voxcpm=本地 VoxCPM2 TTS 服务。可在 voice.ts 注册更多供应商。语音输入由独立扩展配置。 */
     provider: string;
-    /** 发：用语音回复（受 semanticJudge 控制是否触发）。 */
+    /** 启用 qq_send(voice=true) 文字转语音。 */
     tts: boolean;
-    /** 语义判定：通过 LLM 判断本次回复是否应当说语音（对齐 qq_bot _judge_voice）。 */
-    semanticJudge: boolean;
-    /** 语义判定所用 chat 端点（OpenAI 兼容）。 */
-    judgeEndpoint: string;
-    /** 端点密钥的环境变量名。 */
-    judgeApiKeySecret: string;
-    /** 判定模型。 */
-    judgeModel: string;
     /** 自定义(custom/local)语音供应商的 OpenAI 兼容音频端点基址（仅 TTS 用）；选 custom/local 供应商时必填。 */
     voiceBaseUrl: string;
     /** 自定义语音供应商 API Key 的环境变量名（控制台密钥库填写）。 */
@@ -291,9 +246,9 @@ export const QQ_DEFAULTS: QQWorldConfig = {
   sendIntervalMs: 600,
   vision: {
     enabled: false,
-    endpoint: 'https://openrouter.ai/api/v1',
-    apiKeySecret: 'OPENROUTER_API_KEY',
-    model: 'google/gemini-2.5-flash',
+    endpoint: '',
+    apiKeySecret: '',
+    model: '',
     maxConcurrent: 3,
     maxBytes: 8_000_000,
     timeoutMs: 30000,
@@ -307,13 +262,6 @@ export const QQ_DEFAULTS: QQWorldConfig = {
   proactive: {
     enabled: false,
     mode: 'private',
-    systemPrompt:
-      '你要主动找对方说话（不是回复，是主动冒泡）。' +
-      '从真实对话里挑一个仍有意思的细节，分享自己的看法、感受或好奇，语气自然，长短随内容。' +
-      '已有消息没有得到回应、又没有新的内容时，可以保持安静，返回 JSON {"text":""}。',
-    endpoint: 'https://openrouter.ai/api/v1',
-    apiKeySecret: 'OPENROUTER_API_KEY',
-    model: 'google/gemini-2.5-flash',
     tickSec: 45,
     warmupMin: 2,
     stableChancePerTick: 0.2,
@@ -324,32 +272,8 @@ export const QQ_DEFAULTS: QQWorldConfig = {
     silentHours: 6,
     dailyQuota: 20,
     dedupWindow: 12,
-    topicSimilarity: 0.6,
-    tokenLimit: 2000,
-    withNickname: true,
     quietFrom: 0,
     quietTo: 0,
-  },
-  qzone: {
-    enabled: false,
-    systemPrompt:
-      '你现在要以第一人称在 QQ 空间发一条动态（说说）。内容要像你自己真实的朋友圈碎碎念：可以对最近聊天里某件事、某个人发表你的真实看法、吐槽、安利或简介，也可以分享当下的心情。自然、有梗、带点小情绪，别太长（1-3 句最佳，最多不超 100 字）。不要写成回复、不要加「在吗」、不要客服腔，可带少量 emoji。',
-    endpoint: 'https://openrouter.ai/api/v1',
-    apiKeySecret: 'OPENROUTER_API_KEY',
-    model: 'google/gemini-2.5-flash',
-    tickSec: 900,
-    chancePerTick: 0.15,
-    dailyQuota: 5,
-    permission: 1,
-    imageMode: 'none',
-    autoReplyComments: {
-      enabled: false,
-      systemPrompt:
-        '你在 QQ 空间收到别人对你动态的评论，要回一句。自然，像真朋友随口接话，别太长别客套，可带 emoji。',
-      dailyQuota: 20,
-      cooldownSec: 30,
-    },
-    commentAction: 'send_qzone_comment',
   },
   groupSpeak: {
     enabled: true,
@@ -360,14 +284,6 @@ export const QQ_DEFAULTS: QQWorldConfig = {
     enabled: true,
     maxConsecutiveBotTurns: 5,
     idleToEndSec: 300,
-  },
-  emotion: {
-    enabled: true,
-    endpoint: 'https://api.deepseek.com/v1',
-    apiKeySecret: 'DEEPSEEK_API_KEY',
-    model: 'deepseek-chat',
-    decayHours: 2.0,
-    labelMinutes: 40,
   },
   timezone: 'Asia/Shanghai',
   routine: {
@@ -383,18 +299,11 @@ export const QQ_DEFAULTS: QQWorldConfig = {
   reminder: {
     enabled: true,
   },
-  affinity: {
-    enabled: true,
-  },
   selfName: '',
   voice: {
     enabled: false,
     provider: 'native',
     tts: true,
-    semanticJudge: true,
-    judgeEndpoint: 'https://api.deepseek.com/v1',
-    judgeApiKeySecret: 'DEEPSEEK_API_KEY',
-    judgeModel: 'deepseek-chat',
     voiceBaseUrl: '',
     voiceApiKeySecret: 'VOICE_API_KEY',
     voiceVoice: '',
@@ -422,7 +331,7 @@ export const QQ_DEFAULTS: QQWorldConfig = {
   },
 };
 
-export const QQ_SECRETS = ['QQ_ACCESS_TOKEN', 'OPENROUTER_API_KEY', 'DEEPSEEK_API_KEY', 'VOICE_API_KEY'];
+export const QQ_SECRETS = ['QQ_ACCESS_TOKEN', 'VOICE_API_KEY'];
 
 /** worlds.qq 配置段：业务参数 + 必需的 enabled 开关。 */
 export type QQConfigSection = QQWorldConfig & WorldSection;
@@ -476,6 +385,8 @@ export const QQ_CONFIG_GROUP: ConfigGroup = {
       'worlds.qqbot.maxPrivateMessagesPerReply': {type:'integer',title:'私聊每次回复最多条数',minimum:0,maximum:20,'x-hot':true,description:'同一条私聊来信对应的回复上限，文字、图片和语音共用；跨多次工具调用与模型回合累计，收到新消息才重置。超出的分句尽量合并，0 表示不限。'},
       'worlds.qqbot.sendIntervalMs': { type: 'integer', title: '发送间隔(ms)', minimum: 0, maximum: 5000, 'x-hot': true, description: '逐条发送之间的间隔，0 表示不限速。' },
       'worlds.qqbot.vision.enabled': { type: 'boolean', title: '开启辅助视觉', 'x-hot': false },
+      'worlds.qqbot.vision.endpoint': { type: 'string', title: '辅助视觉 API 地址', 'x-hot': false },
+      'worlds.qqbot.vision.apiKeySecret': { type: 'string', title: '辅助视觉密钥名', 'x-hot': false },
       'worlds.qqbot.vision.model': { type: 'string', title: 'VLM 模型', 'x-hot': false },
       'worlds.qqbot.sticker.enabled': { type: 'boolean', title: '自动收藏表情包', 'x-hot': false, description: '开启后自动下载消息里的表情包并标注情感/用处、内容去重。' },
       'worlds.qqbot.sticker.captureMode': {
@@ -493,32 +404,16 @@ export const QQ_CONFIG_GROUP: ConfigGroup = {
         'x-hot': true,
         description: 'private=仅私聊；group=仅群；both=都主动。',
       },
-      'worlds.qqbot.proactive.model': { type: 'string', title: '主动消息模型', 'x-hot': false, description: '生成主动闲聊用的 chat 模型（OpenAI 兼容端点）。' },
-      'worlds.qqbot.proactive.systemPrompt': { type: 'string', title: '主动聊天的公开人设与表达', 'x-hot': false, description: '独立生成器使用的公开性格与表达要求。不要填入私人档案或其他会话内容；修改后重启生效。' },
       'worlds.qqbot.proactive.privateCooldownSec': { type: 'integer', title: '私聊主动消息间隔(秒)', minimum: 0, maximum: 86400, 'x-hot': false, description: '同一私聊两次主动消息的最小间隔；修改后重启生效。' },
       'worlds.qqbot.proactive.dailyQuota': { type: 'integer', title: '每日上限', minimum: 0, maximum: 200, 'x-hot': true, description: '每日主动消息条数上限（0=不限）。' },
       'worlds.qqbot.proactive.quietFrom': { type: 'integer', title: '静默开始(时)', minimum: 0, maximum: 23, 'x-hot': true, description: '按配置时区。静默期间停止主动冒泡和群聊发送，允许私聊回复；与结束小时相同则关闭。' },
       'worlds.qqbot.proactive.quietTo': { type: 'integer', title: '静默结束(时)', minimum: 0, maximum: 23, 'x-hot': true },
-      'worlds.qqbot.qzone.enabled': { type: 'boolean', title: 'QQ空间动态', 'x-hot': false, description: '开启后可在 QQ 空间发动态、自动冒泡、回复评论。需重启生效。' },
-      'worlds.qqbot.qzone.model': { type: 'string', title: '动态生成模型', 'x-hot': false, description: '生成动态/评论所用 chat 模型（OpenAI 兼容端点）。' },
-      'worlds.qqbot.qzone.dailyQuota': { type: 'integer', title: '每日自动动态上限', minimum: 0, maximum: 50, 'x-hot': true, description: '后台自动发动态的每日条数上限（0=不限）。' },
-      'worlds.qqbot.qzone.permission': { type: 'integer', title: '动态可见权限', minimum: 0, maximum: 10, 'x-hot': true, description: 'ugc_right：1=公开（默认），其余值随 NapCat 版本。' },
-      'worlds.qqbot.qzone.imageMode': { type: 'string', title: '自动附图', enum: ['none', 'recent'], 'x-hot': true, description: 'none=不附图；recent=自动附上最近一条 QQ 图片。' },
-      'worlds.qqbot.qzone.autoReplyComments.enabled': { type: 'boolean', title: '自动回复空间评论', 'x-hot': false, description: '收到空间评论时自动生成并回复。需重启生效。' },
-      'worlds.qqbot.qzone.commentAction': { type: 'string', title: '评论回复 action', 'x-hot': true, description: '回复评论用的 OneBot action（不同 NapCat 版本可能不同，默认 send_qzone_comment）。' },
-      'worlds.qqbot.proactive.topicSimilarity': { type: 'number', title: '话题相似度上限', minimum: 0, maximum: 1, 'x-hot': true, description: '0~1：主动消息与近期已发内容相似度超过该值则跳过（防同一话题反复换汤不换药）。0=关闭。' },
-      'worlds.qqbot.proactive.tokenLimit': { type: 'integer', title: '主动消息 Token 上限', minimum: 50, maximum: 8000, 'x-hot': true, description: '主动消息生成时模型输出 token 上限（越大单次说得越长）。默认 2000，改完即时生效。' },
-      'worlds.qqbot.proactive.withNickname': { type: 'boolean', title: '主动说话带昵称/称呼', 'x-hot': true, description: '开启时主动消息会称呼对方昵称；关闭后不称呼对方具体名字，直接用「你」即可。改完即时生效。' },
       'worlds.qqbot.groupSpeak.enabled': { type: 'boolean', title: '群聊发言限速', 'x-hot': true, description: '开启后限制每个群在单位窗口内被 bot 发出的消息总量，防止刷屏/死循环灌水。' },
       'worlds.qqbot.groupSpeak.maxPerWindow': { type: 'integer', title: '窗口内最大条数', minimum: 1, maximum: 200, 'x-hot': true, description: '滑动窗口内允许发出的群消息上限（含主动与回复）。' },
       'worlds.qqbot.groupSpeak.windowSec': { type: 'integer', title: '窗口长度(秒)', minimum: 1, maximum: 3600, 'x-hot': true, description: '限速滑动窗口长度。' },
       'worlds.qqbot.antiLoop.enabled': { type: 'boolean', title: '话题自动结束', 'x-hot': true, description: '开启后统计单会话 bot 连续发言次数与对方静默时长，超限自动收尾，避免话题死循环。' },
       'worlds.qqbot.antiLoop.maxConsecutiveBotTurns': { type: 'integer', title: '连续发言上限', minimum: 1, maximum: 50, 'x-hot': true, description: '单会话内 bot 连续发言达到该次数（对方发消息即清零），下次发言被拦截并提示收尾。' },
       'worlds.qqbot.antiLoop.idleToEndSec': { type: 'integer', title: '对方静默收尾(秒)', minimum: 0, maximum: 86400, 'x-hot': true, description: '对方静默超过该秒数且 bot 已发过言则自动收尾；0=关闭该规则。' },
-      'worlds.qqbot.emotion.enabled': { type: 'boolean', title: '情绪系统', 'x-hot': true, description: '开启后每轮对话感知情绪、把心情注入全局上下文，并支持 /心情 查询（移植自 fat-fish）。' },
-      'worlds.qqbot.emotion.decayHours': { type: 'number', title: '心情衰减半衰期(小时)', minimum: 0.1, maximum: 48, 'x-hot': true, description: '心情值自然回落到中性（0）的半衰期，越小忘得越快。' },
-      'worlds.qqbot.emotion.labelMinutes': { type: 'number', title: '主导情绪冷却(分)', minimum: 0, maximum: 120, 'x-hot': true, description: '冷却期内不切换到新的主导情绪标签，避免来回横跳。' },
-      'worlds.qqbot.emotion.model': { type: 'string', title: '情绪感知模型', 'x-hot': false, description: '用于分析用户消息情绪、抽取心情变化的 chat 模型（OpenAI 兼容端点）。' },
       'worlds.qqbot.routine.enabled': { type: 'boolean', title: '作息功能', 'x-hot': true, description: '开启后按真实时间切换「睡眠/午休/活跃」状态：睡眠段暂停主动冒泡并到点播报，午休段仅在语气里体现。改完即时生效。' },
       'worlds.qqbot.routine.sleepStart': { type: 'string', title: '睡眠开始(HH:MM)', 'x-hot': true, description: '进入睡眠时段的时间（24h，可早于 sleepEnd 形成跨午夜，如 23:00）。睡眠段内不主动冒泡，但仍能被动回复。' },
       'worlds.qqbot.routine.sleepEnd': { type: 'string', title: '睡眠结束(HH:MM)', 'x-hot': true, description: '离开睡眠时段的时间（24h）。离开时主动说「醒来」播报文案。' },
@@ -528,7 +423,6 @@ export const QQ_CONFIG_GROUP: ConfigGroup = {
       'worlds.qqbot.routine.greetWake': { type: 'string', title: '醒来播报(兜底)', 'x-hot': true, description: '离开睡眠段的兜底文案：正常由 LLM 生成，失败才回退。空=无兜底。' },
       'worlds.qqbot.routine.greetLazy': { type: 'string', title: '午休播报(兜底)', 'x-hot': true, description: '进入午休段的兜底文案：正常由 LLM 生成，失败才回退。空=无兜底。' },
       'worlds.qqbot.reminder.enabled': { type: 'boolean', title: '到点提醒', 'x-hot': true, description: '开启后，记下的定时提醒会在到点时自动发到对应会话；记录/查询/取消不受此开关影响（始终可用）。' },
-  'worlds.qqbot.affinity.enabled': { type: 'boolean', title: '好感度系统', 'x-hot': true, description: '开启后，你对每个用户的好感度（-100~100，可正可负）会随互动增减，并在与该用户对话时自动注入上下文、影响你的态度与分寸。记录/查询/调整工具始终可用。' },
       'worlds.qqbot.admin.enabled': { type: 'boolean', title: '群管理员能力', 'x-hot': true, description: '开启后可在群里执行管理员操作：群撤回 / @全体成员 / 发群通知 / 审核进群 / 给予群头衔 / 禁言（及全员禁言）/ 踢出群聊。需要 bot 是群管理员或群主，否则 QQ 会拒绝。qq_admin_* 工具始终可用，关闭则提示“功能未开启”。' },
       'worlds.qqbot.admin.allowlist': { type: 'string', title: '授权指挥官(QQ号,逗号分隔)', 'x-hot': true, description: '白名单：这些 QQ 号的人可在对话里命令 bot 执行管理员操作（撤消息/禁言等），不受群身份限制。多个用逗号分隔，如 123456,654321。留空=不单独授权任何人。' },
       'worlds.qqbot.admin.allowGroupAdmins': { type: 'boolean', title: '允许群管/群主指挥', 'x-hot': true, description: '为 true 时，群里的管理员/群主在对话里发话即可指挥 bot 执行管理操作。设为 false 则只有白名单里的人能指挥。' },
@@ -562,8 +456,6 @@ export const QQ_CONFIG_GROUP: ConfigGroup = {
     description: '语音供应商（实现方式）：下拉项由 voice.ts 注册的供应商动态生成。native=OneBot 原生 translate_record/tts（零依赖）；custom=用配置页填写的模型网址+API Key 对接远程 OpenAI 兼容音频服务；local=本地/自建模型（免 API Key，慢推理可加超时，支持额外参数做声音克隆/设计，如 VoxCPM2 经 vLLM-Omni）；voxcpm=本地 VoxCPM2 TTS 服务（自有接口，音色用自然语言描述，免 API Key，收语音回退 native 识别）。新增供应商只需在 voice.ts 用 registerVoiceProvider 注册。',
   },
   'worlds.qqbot.voice.tts': { type: 'boolean', title: '发语音', 'x-hot': false, description: '开启后，当语义判定认为应当说语音时，回复发成语音。' },
-  'worlds.qqbot.voice.semanticJudge': { type: 'boolean', title: '语义判定是否说语音', 'x-hot': false, description: '开启后通过 LLM 判断用户是否想听语音（对齐 qq_bot _judge_voice）；关闭则仅当用户显式要求时才说语音。' },
-  'worlds.qqbot.voice.judgeModel': { type: 'string', title: '语义判定模型', 'x-hot': false, description: '判定“是否说语音”用的轻量 chat 模型（OpenAI 兼容端点）。' },
   'worlds.qqbot.voice.voiceBaseUrl': { type: 'string', title: '语音模型网址', 'x-hot': false, description: '选 custom / local 供应商时必填：OpenAI 兼容音频端点基址。远程如 https://open.bigmodel.cn/api/paas/v4 或 https://api.openai.com/v1；本地如 http://localhost:8000/v1（VoxCPM2 经 vLLM-Omni）。TTS 走 {网址}/audio/speech。' },
   'worlds.qqbot.voice.voiceApiKeySecret': { type: 'string', title: '语音 API Key 变量', 'x-hot': false, description: 'custom 供应商 API Key 所在的环境变量名（密钥在控制台密钥库填写，默认 VOICE_API_KEY）。local 供应商免 API Key，留空即可。' },
   'worlds.qqbot.voice.voiceVoice': { type: 'string', title: '音色', 'x-hot': false, description: '仅当所选语音模型支持音色时填写（如 tongtong）；留空使用服务商默认音色。' },
@@ -640,10 +532,6 @@ export function normalizeConfig(raw: QQConfigSection): QQWorldConfig {
   const p = c.proactive as Record<string, unknown>;
   if (typeof p.enabled !== 'boolean') p.enabled = false;
   if (p.mode !== 'private' && p.mode !== 'group' && p.mode !== 'both') p.mode = 'private';
-  if (typeof p.systemPrompt !== 'string' || !p.systemPrompt) p.systemPrompt = QQ_DEFAULTS.proactive.systemPrompt;
-  if (typeof p.endpoint !== 'string' || !p.endpoint) p.endpoint = QQ_DEFAULTS.proactive.endpoint;
-  if (typeof p.apiKeySecret !== 'string' || !p.apiKeySecret) p.apiKeySecret = QQ_DEFAULTS.proactive.apiKeySecret;
-  if (typeof p.model !== 'string' || !p.model) p.model = QQ_DEFAULTS.proactive.model;
   if (typeof p.tickSec !== 'number') p.tickSec = QQ_DEFAULTS.proactive.tickSec;
   if (typeof p.warmupMin !== 'number') p.warmupMin = QQ_DEFAULTS.proactive.warmupMin;
   if (typeof p.stableChancePerTick !== 'number') p.stableChancePerTick = QQ_DEFAULTS.proactive.stableChancePerTick;
@@ -654,33 +542,9 @@ export function normalizeConfig(raw: QQConfigSection): QQWorldConfig {
   if (typeof p.silentHours !== 'number') p.silentHours = QQ_DEFAULTS.proactive.silentHours;
   if (typeof p.dailyQuota !== 'number') p.dailyQuota = QQ_DEFAULTS.proactive.dailyQuota;
   if (typeof p.dedupWindow !== 'number') p.dedupWindow = QQ_DEFAULTS.proactive.dedupWindow;
-  if (typeof p.topicSimilarity !== 'number' || (p.topicSimilarity as number) < 0 || (p.topicSimilarity as number) > 1) p.topicSimilarity = QQ_DEFAULTS.proactive.topicSimilarity;
-  if (typeof p.tokenLimit !== 'number' || (p.tokenLimit as number) < 50) p.tokenLimit = QQ_DEFAULTS.proactive.tokenLimit;
-  if (typeof p.withNickname !== 'boolean') p.withNickname = QQ_DEFAULTS.proactive.withNickname;
   for (const key of ['quietFrom', 'quietTo'] as const) {
     if (!Number.isInteger(p[key]) || Number(p[key]) < 0 || Number(p[key]) > 23) p[key] = QQ_DEFAULTS.proactive[key];
   }
-  // qzone 子对象原地合并
-  c.qzone = c.qzone && typeof c.qzone === 'object' ? c.qzone : {...QQ_DEFAULTS.qzone};
-  Object.assign(c.qzone, { ...QQ_DEFAULTS.qzone, ...(c.qzone as unknown as Record<string, unknown>) });
-  const q = c.qzone as unknown as Record<string, unknown>;
-  if (typeof q.enabled !== 'boolean') q.enabled = false;
-  if (typeof q.systemPrompt !== 'string' || !q.systemPrompt) q.systemPrompt = QQ_DEFAULTS.qzone.systemPrompt;
-  if (typeof q.endpoint !== 'string' || !q.endpoint) q.endpoint = QQ_DEFAULTS.qzone.endpoint;
-  if (typeof q.apiKeySecret !== 'string' || !q.apiKeySecret) q.apiKeySecret = QQ_DEFAULTS.qzone.apiKeySecret;
-  if (typeof q.model !== 'string' || !q.model) q.model = QQ_DEFAULTS.qzone.model;
-  if (typeof q.tickSec !== 'number') q.tickSec = QQ_DEFAULTS.qzone.tickSec;
-  if (typeof q.chancePerTick !== 'number') q.chancePerTick = QQ_DEFAULTS.qzone.chancePerTick;
-  if (typeof q.dailyQuota !== 'number') q.dailyQuota = QQ_DEFAULTS.qzone.dailyQuota;
-  if (typeof q.permission !== 'number') q.permission = QQ_DEFAULTS.qzone.permission;
-  if (q.imageMode !== 'none' && q.imageMode !== 'recent') q.imageMode = 'none' as const;
-  const ar = (q.autoReplyComments ??= {}) as Record<string, unknown>;
-  Object.assign(ar, { ...QQ_DEFAULTS.qzone.autoReplyComments, ...ar });
-  if (typeof ar.enabled !== 'boolean') ar.enabled = false;
-  if (typeof ar.systemPrompt !== 'string' || !ar.systemPrompt) ar.systemPrompt = QQ_DEFAULTS.qzone.autoReplyComments.systemPrompt;
-  if (typeof ar.dailyQuota !== 'number') ar.dailyQuota = QQ_DEFAULTS.qzone.autoReplyComments.dailyQuota;
-  if (typeof ar.cooldownSec !== 'number') ar.cooldownSec = QQ_DEFAULTS.qzone.autoReplyComments.cooldownSec;
-  if (typeof q.commentAction !== 'string' || !q.commentAction) q.commentAction = QQ_DEFAULTS.qzone.commentAction;
   // groupSpeak / antiLoop 子对象原地合并
   c.groupSpeak = c.groupSpeak ?? {};
   Object.assign(c.groupSpeak, { ...QQ_DEFAULTS.groupSpeak, ...(c.groupSpeak as object) });
@@ -694,16 +558,6 @@ export function normalizeConfig(raw: QQConfigSection): QQWorldConfig {
   if (typeof al.enabled !== 'boolean') al.enabled = true;
   if (typeof al.maxConsecutiveBotTurns !== 'number' || (al.maxConsecutiveBotTurns as number) < 1) al.maxConsecutiveBotTurns = QQ_DEFAULTS.antiLoop.maxConsecutiveBotTurns;
   if (typeof al.idleToEndSec !== 'number' || (al.idleToEndSec as number) < 0) al.idleToEndSec = QQ_DEFAULTS.antiLoop.idleToEndSec;
-  // emotion 子对象原地合并
-  c.emotion = c.emotion ?? {};
-  Object.assign(c.emotion, { ...QQ_DEFAULTS.emotion, ...(c.emotion as object) });
-  const em = c.emotion as Record<string, unknown>;
-  if (typeof em.enabled !== 'boolean') em.enabled = true;
-  if (typeof em.endpoint !== 'string' || !em.endpoint) em.endpoint = QQ_DEFAULTS.emotion.endpoint;
-  if (typeof em.apiKeySecret !== 'string' || !em.apiKeySecret) em.apiKeySecret = QQ_DEFAULTS.emotion.apiKeySecret;
-  if (typeof em.model !== 'string' || !em.model) em.model = QQ_DEFAULTS.emotion.model;
-  if (typeof em.decayHours !== 'number' || (em.decayHours as number) <= 0) em.decayHours = QQ_DEFAULTS.emotion.decayHours;
-  if (typeof em.labelMinutes !== 'number' || (em.labelMinutes as number) < 0) em.labelMinutes = QQ_DEFAULTS.emotion.labelMinutes;
   // routine 子对象原地合并
   c.routine = c.routine && typeof c.routine === 'object' ? c.routine : {...QQ_DEFAULTS.routine};
   Object.assign(c.routine, { ...QQ_DEFAULTS.routine, ...(c.routine as object) });
@@ -721,11 +575,6 @@ export function normalizeConfig(raw: QQConfigSection): QQWorldConfig {
   Object.assign(c.reminder, { ...QQ_DEFAULTS.reminder, ...(c.reminder as object) });
   const rm = c.reminder as Record<string, unknown>;
   if (typeof rm.enabled !== 'boolean') rm.enabled = true;
-  // affinity 子对象原地合并
-  c.affinity = c.affinity && typeof c.affinity === 'object' ? c.affinity : {...QQ_DEFAULTS.affinity};
-  Object.assign(c.affinity, { ...QQ_DEFAULTS.affinity, ...(c.affinity as object) });
-  const af = c.affinity as Record<string, unknown>;
-  if (typeof af.enabled !== 'boolean') af.enabled = true;
   // voice 子对象原地合并
   c.voice = c.voice && typeof c.voice === 'object' ? c.voice : {...QQ_DEFAULTS.voice};
   Object.assign(c.voice, { ...QQ_DEFAULTS.voice, ...(c.voice as object) });
@@ -733,10 +582,6 @@ export function normalizeConfig(raw: QQConfigSection): QQWorldConfig {
   if (typeof vc.enabled !== 'boolean') vc.enabled = false;
   if (!voiceProviderIds().includes(vc.provider as string)) vc.provider = 'native';
   if (typeof vc.tts !== 'boolean') vc.tts = true;
-  if (typeof vc.semanticJudge !== 'boolean') vc.semanticJudge = true;
-  if (typeof vc.judgeEndpoint !== 'string' || !vc.judgeEndpoint) vc.judgeEndpoint = QQ_DEFAULTS.voice.judgeEndpoint;
-  if (typeof vc.judgeApiKeySecret !== 'string' || !vc.judgeApiKeySecret) vc.judgeApiKeySecret = QQ_DEFAULTS.voice.judgeApiKeySecret;
-  if (typeof vc.judgeModel !== 'string' || !vc.judgeModel) vc.judgeModel = QQ_DEFAULTS.voice.judgeModel;
   if (typeof vc.voiceBaseUrl !== 'string') vc.voiceBaseUrl = QQ_DEFAULTS.voice.voiceBaseUrl;
   if (typeof vc.voiceApiKeySecret !== 'string' || !vc.voiceApiKeySecret) vc.voiceApiKeySecret = QQ_DEFAULTS.voice.voiceApiKeySecret;
   if (typeof vc.voiceVoice !== 'string') vc.voiceVoice = QQ_DEFAULTS.voice.voiceVoice;

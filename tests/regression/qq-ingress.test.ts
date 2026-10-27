@@ -123,7 +123,7 @@ it('legacy pending startup events are capped and closed records are discarded',a
   expect(delivered.filter(e=>e.type==='qq.message').every(e=>e.senderKey==='private:1'&&e.meta.history)).toBe(true);
 });
 
-it('history tools, space context and cached pictures cannot expose closed or unlisted conversations',async()=>{
+it('history tools and cached pictures cannot expose closed or unlisted conversations',async()=>{
   const {q}=fixture({replyGroups:false});
   const row=(cursor:number,senderKey:string,text:string)=>({cursor,senderKey,text,ts:new Date().toISOString(),source:'qqbot',type:'qq.message'});
   const allowed=row(1,'private:1','允许内容'),closed=row(2,'group:2','关闭群秘密'),unlisted=row(3,'group:9','名单外秘密');
@@ -133,9 +133,7 @@ it('history tools, space context and cached pictures cannot expose closed or unl
   const result=await search.handler({mode:'search',keyword:'内容'},{});
   expect(result).toContain('允许内容');expect(result).not.toContain('秘密');
   expect(await tools.find((t:any)=>t.name==='qq_history').handler({mode:'recent',group:2},{})).toContain('未开放读取');
-  expect(JSON.parse(q.qzoneContext())).toMatchObject({text:'允许内容',conversation:'private:1',occurredAt:allowed.ts});
-  expect(q.qzoneContext()).not.toContain('秘密');expect(q.recentContextFor('group:2')).toBe('');
-  q.recentImages.push({url:'http://closed.invalid/pic',conv:'group:2'});
-  expect(q.recentImageUrl()).toBeNull();q.config.vision.enabled=true;
+  expect(q.recentContextFor('group:2')).toBe('');
+  q.recentImages.push({url:'http://closed.invalid/pic',conv:'group:2'});q.config.vision.enabled=true;
   expect(await tools.find((t:any)=>t.name==='qq_view_image').handler({},{})).toContain('未开放读取');
 });

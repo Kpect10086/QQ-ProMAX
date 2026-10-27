@@ -6,13 +6,10 @@ var MODULES = [
   { id: "vision", title: "\u89C6\u89C9", desc: "\u8F85\u52A9\u89C6\u89C9\uFF08VLM\uFF09\uFF1A\u63A5\u6536\u56FE\u7247\u65F6\u7528\u89C6\u89C9\u6A21\u578B\u7406\u89E3\u3002", group: "world:qqbot", prefix: "worlds.qqbot.vision.", topOnly: false },
   { id: "sticker", title: "\u8868\u60C5\u5305", desc: "\u81EA\u52A8\u6536\u85CF\u8868\u60C5\u5305\uFF1A\u4E0B\u8F7D\u6D88\u606F\u91CC\u7684\u56FE\u7247\u5E76\u6807\u6CE8\u60C5\u611F/\u7528\u5904\u3002", group: "world:qqbot", prefix: "worlds.qqbot.sticker.", topOnly: false },
   { id: "proactive", title: "\u4E3B\u52A8\u8BF4\u8BDD", desc: "\u540E\u53F0\u6309\u72B6\u6001\u673A\u5411\u76D1\u542C\u4F1A\u8BDD\u4E3B\u52A8\u5192\u6CE1\u95F2\u804A\u3002", group: "world:qqbot", prefix: "worlds.qqbot.proactive.", topOnly: false },
-  { id: "qzone", title: "QQ\u7A7A\u95F4", desc: "QQ \u7A7A\u95F4\u52A8\u6001\u53D1\u5E03\u3001\u81EA\u52A8\u5192\u6CE1\u4E0E\u8BC4\u8BBA\u56DE\u590D\u3002", group: "world:qqbot", prefix: "worlds.qqbot.qzone.", topOnly: false },
   { id: "group-speak", title: "\u7FA4\u804A\u9650\u901F", desc: "\u9650\u5236\u6BCF\u4E2A\u7FA4\u5355\u4F4D\u7A97\u53E3\u5185 bot \u53D1\u51FA\u7684\u6D88\u606F\u603B\u91CF\u3002", group: "world:qqbot", prefix: "worlds.qqbot.groupSpeak.", topOnly: false },
   { id: "anti-loop", title: "\u9632\u5237/\u8BDD\u9898\u7ED3\u675F", desc: "\u7EDF\u8BA1\u8FDE\u7EED\u53D1\u8A00\u4E0E\u9759\u9ED8\u65F6\u957F\uFF0C\u8D85\u9650\u81EA\u52A8\u6536\u5C3E\u3002", group: "world:qqbot", prefix: "worlds.qqbot.antiLoop.", topOnly: false },
-  { id: "emotion", title: "\u60C5\u7EEA\u7CFB\u7EDF", desc: "\u6BCF\u8F6E\u5BF9\u8BDD\u611F\u77E5\u60C5\u7EEA\u3001\u6CE8\u5165\u5168\u5C40\u4E0A\u4E0B\u6587\u3002", group: "world:qqbot", prefix: "worlds.qqbot.emotion.", topOnly: false },
   { id: "routine", title: "\u4F5C\u606F\u529F\u80FD", desc: "\u7761\u7720/\u5348\u4F11/\u6D3B\u8DC3\u4F5C\u606F\uFF0C\u5230\u70B9\u64AD\u62A5\u3002", group: "world:qqbot", prefix: "worlds.qqbot.routine.", topOnly: false },
   { id: "reminder", title: "\u5230\u70B9\u63D0\u9192", desc: "\u5B9A\u65F6\u63D0\u9192\u5230\u70B9\u81EA\u52A8\u53D1\u5230\u5BF9\u5E94\u4F1A\u8BDD\u3002", group: "world:qqbot", prefix: "worlds.qqbot.reminder.", topOnly: false },
-  { id: "affinity", title: "\u597D\u611F\u5EA6", desc: "\u597D\u611F\u5EA6\u7CFB\u7EDF\uFF1A\u968F\u4E92\u52A8\u589E\u51CF\u5E76\u6CE8\u5165\u5BF9\u8BDD\u4E0A\u4E0B\u6587\u3002", group: "world:qqbot", prefix: "worlds.qqbot.affinity.", topOnly: false },
   { id: "admin", title: "\u7FA4\u7BA1\u7406\u5458", desc: "\u64A4\u56DE/@\u5168\u4F53/\u901A\u77E5/\u5BA1\u6838\u8FDB\u7FA4/\u5934\u8854/\u7981\u8A00/\u8E22\u4EBA\u3002", group: "world:qqbot", prefix: "worlds.qqbot.admin.", topOnly: false },
   { id: "voice", title: "\u8BED\u97F3\u53D1\u9001", desc: "AI \u56DE\u590D\u8F6C\u8BED\u97F3\uFF1B\u97F3\u9891\u8F93\u5165\u9700\u5355\u72EC\u5B89\u88C5 QQ Audio Input\u3002\u53EF\u6574\u4F53\u5F00\u5173\u3002", group: "world:qqbot-voice", prefix: "", topOnly: false, status: "getVoiceState" }
 ];
@@ -170,6 +167,11 @@ function makePanel(m) {
             statusBox.textContent = "\u72B6\u6001\u8BFB\u53D6\u5931\u8D25";
           }
         );
+      }
+      if (m.id === "proactive") {
+        sheet.body.appendChild(ui.button("\u6D4B\u8BD5\u4EA4\u6D41\u4E8B\u4EF6", { onClick: () => {
+          void ctx.invoke("triggerProactive", []).then((result) => toast(String(result)), (error) => toast(String(error)));
+        } }));
       }
       if (m.id === "general") {
         const bar = ui.rowbar();

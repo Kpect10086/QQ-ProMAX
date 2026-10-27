@@ -20,6 +20,7 @@ jobs:
         with:
           python-version: '3.11'
       - run: npm ci
+      - run: npm run build:qzone
       - run: npm test
       - run: npm run test:package
       - run: npm run test:asr
